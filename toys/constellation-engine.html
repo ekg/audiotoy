@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Constellation Engine</title>
+</head>
+<body>
+<script type="module">
+import { createToy } from '../scaffold/lib/toy.js';
+
+// --- Constants ---
+const CONNECTION_DIST = 0.15;   // max distance (normalized) for constellation lines
+const BEAM_WIDTH = 0.015;       // half-width of sweep beam trigger zone
+const STAR_HIT_RADIUS = 0.04;  // touch/click hit radius (normalized)
+const MIN_FREQ = 130.81;        // C3
+const MAX_FREQ = 1046.50;       // C6
+const BG_STAR_COUNT = 150;
+const DRIFT_SPEED = 0.00003;
+
+// --- Shared state for permalink access ---
+let sharedStars = [];
+let nextStarId = 0;
+
+// --- Helpers ---
+
+function yToFreq(y) {
+  // y=0 (top) → high pitch, y=1 (bottom) → low pitch
+  const t = 1 - Math.max(0, Math.min(1, y));
+  return MIN_FREQ * Math.pow(MAX_FREQ / MIN_FREQ, t);
+}
+
+function dist(a, b) {
+  return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+}
+
+function updateConnections(stars) {
+  for (const star of stars) star.connections = [];
+  for (let i = 0; i < stars.length; i++) {
+    for (let j = i + 1; j < stars.length; j++) {
+      if (dist(stars[i], stars[j]) < CONNECTION_DIST) {
+        stars[i].connections.push(stars[j].id);
+        stars[j].connections.push(stars[i].id);
+      }
+    }
+  }
+}
+
+function findStarAt(stars, x, y) {
+  let closest = null;
+  let closestDist = STAR_HIT_RADIUS;
+  for (const star of stars) {
+    const d = dist(star, { x, y });
+    if (d < closestDist) {
+      closest = star;
+      closestDist = d;
+    }
+  }
+  return closest;
+}
+
+function makeStar(id, x, y, brightness) {
+  return {
+    id, x, y, brightness,
+    driftVx: (Math.random() - 0.5) * DRIFT_SPEED * 2,
+    driftVy: (Math.random() - 0.5) * DRIFT_SPEED * 2,
+    connections: [],
+  };
+}
+
+function triggerStar(ctx, activeVoices, star, amplitude) {
+  if (activeVoices.has(star.id)) return;
+
+  const ac = ctx.audio;
+  const now = ac.currentTime;
+  const freq = yToFreq(star.y);
+  const numHarmonics = Math.floor(3 + star.brightness * 5); // 3–8
+
+  // Master envelope for this star's voice
+  const envelope = ac.createGain();
+  envelope.gain.setValueAtTime(0, now);
+
+  const attackTime = 0.1 + star.brightness * 0.2;   // 100–300ms
+  const sustainTime = 0.15;
+  const releaseTime = 1 + star.brightness * 2;       // 1–3s
+  const peakGain = star.brightness * amplitude * 0.12;
+
+  envelope.gain.linearRampToValueAtTime(peakGain, now + attackTime);
+  envelope.gain.setValueAtTime(peakGain, now + attackTime + sustainTime);
+  envelope.gain.exponentialRampToValueAtTime(0.001, now + attackTime + sustainTime + releaseTime);
+
+  ctx.connect(envelope);
+
+  const oscillators = [];
+  const stopTime = now + attackTime + sustainTime + releaseTime + 0.1;
+
+  for (let h = 1; h <= numHarmonics; h++) {
+    const osc = ac.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = freq * h;
+
+    const gain = ac.createGain();
+    gain.gain.value = 1 / (h * h); // 1/h² rolloff for soft additive timbre
+
+    osc.connect(gain);
+    gain.connect(envelope);
+    osc.start(now);
+    osc.stop(stopTime);
+    oscillators.push(osc);
+  }
+
+  activeVoices.set(star.id, { oscillators, envelope, endTime: stopTime });
+}
+
+function stopVoice(activeVoices, starId, ctx) {
+  const voice = activeVoices.get(starId);
+  if (!voice) return;
+  const now = ctx.audio.currentTime;
+  voice.envelope.gain.cancelScheduledValues(now);
+  voice.envelope.gain.setValueAtTime(voice.envelope.gain.value, now);
+  voice.envelope.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+  for (const osc of voice.oscillators) {
+    try { osc.stop(now + 0.15); } catch (e) { /* already stopped */ }
+  }
+  activeVoices.delete(starId);
+}
+
+// --- Toy definition ---
+
+createToy({
+  name: 'Constellation Engine',
+  description: 'Click to place stars in the sky. Higher stars sing higher pitches. Brighter stars sing louder. Nearby stars connect into constellations. A sweep beam moves across, playing each star it touches. Double-click to remove a star. Scroll to change sweep speed.',
+
+  setup(ctx) {
+    const stars = sharedStars;
+    const sweep = { x: 0, speed: 0.06 };
+    const activeVoices = new Map();
+    let starsInBeam = new Set();
+    let prevTime = 0;
+
+    // Background star field (visual only)
+    const bgStars = [];
+    for (let i = 0; i < BG_STAR_COUNT; i++) {
+      bgStars.push({
+        x: Math.random(), y: Math.random(),
+        size: Math.random() * 1.5 + 0.5,
+        alpha: Math.random() * 0.25 + 0.05,
+        speed: Math.random() * 2 + 0.5,
+        phase: Math.random() * Math.PI * 2,
+      });
+    }
+
+    // Interaction state
+    const interact = {
+      downTime: 0, downX: 0, downY: 0,
+      downStarId: null, isDragging: false,
+      lastTapTime: 0, lastTapX: 0, lastTapY: 0,
+      pointerId: -1,
+    };
+
+    // Wheel listener for sweep speed
+    ctx.canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      sweep.speed *= e.deltaY > 0 ? 1.15 : 0.87;
+      sweep.speed = Math.max(0.005, Math.min(0.3, sweep.speed));
+    }, { passive: false });
+
+    // If stars were restored from URL
+    if (stars.length > 0) {
+      nextStarId = Math.max(...stars.map(s => s.id)) + 1;
+      updateConnections(stars);
+    }
+
+    return { stars, sweep, activeVoices, starsInBeam, bgStars, interact, prevTime };
+  },
+
+  onInput(ctx, state, event) {
+    const { stars, interact } = state;
+
+    switch (event.type) {
+      case 'pointer-down': {
+        const now = performance.now();
+        const hit = findStarAt(stars, event.x, event.y);
+        interact.downTime = now;
+        interact.downX = event.x;
+        interact.downY = event.y;
+        interact.downStarId = hit ? hit.id : null;
+        interact.isDragging = false;
+        interact.pointerId = event.pointerId;
+        break;
+      }
+
+      case 'pointer-move': {
+        if (interact.pointerId !== event.pointerId || !event.active) break;
+        const dx = event.x - interact.downX;
+        const dy = event.y - interact.downY;
+        if (Math.sqrt(dx * dx + dy * dy) > 0.015 && interact.downStarId !== null) {
+          interact.isDragging = true;
+          const star = stars.find(s => s.id === interact.downStarId);
+          if (star) {
+            star.x = Math.max(0.01, Math.min(0.99, event.x));
+            star.y = Math.max(0.01, Math.min(0.99, event.y));
+          }
+        }
+        break;
+      }
+
+      case 'pointer-up': {
+        if (interact.pointerId !== event.pointerId) break;
+        const now = performance.now();
+
+        if (interact.isDragging) {
+          updateConnections(stars);
+          interact.pointerId = -1;
+          break;
+        }
+
+        const hit = findStarAt(stars, event.x, event.y);
+
+        // Double-tap detection
+        const dtTap = now - interact.lastTapTime;
+        const dTap = Math.sqrt(
+          (event.x - interact.lastTapX) ** 2 +
+          (event.y - interact.lastTapY) ** 2
+        );
+
+        if (dtTap < 400 && dTap < 0.05) {
+          // Double-tap: remove star if one was tapped
+          if (hit) {
+            stopVoice(state.activeVoices, hit.id, ctx);
+            const idx = stars.findIndex(s => s.id === hit.id);
+            if (idx >= 0) stars.splice(idx, 1);
+            updateConnections(stars);
+          }
+          interact.lastTapTime = 0;
+          interact.pointerId = -1;
+          break;
+        }
+
+        // Record tap for double-tap detection
+        interact.lastTapTime = now;
+        interact.lastTapX = event.x;
+        interact.lastTapY = event.y;
+
+        // Single tap on empty space: place a new star
+        if (!hit) {
+          const elapsed = now - interact.downTime;
+          if (elapsed < 500) {
+            const id = nextStarId++;
+            stars.push(makeStar(id, event.x, event.y, 0.4 + Math.random() * 0.6));
+            updateConnections(stars);
+          }
+        }
+
+        interact.pointerId = -1;
+        break;
+      }
+    }
+  },
+
+  render(ctx, state, time) {
+    const { ctx2d, width, height } = ctx;
+    const { stars, sweep, activeVoices, bgStars } = state;
+
+    // Delta time (seconds), capped to avoid jumps
+    const dt = state.prevTime > 0 ? Math.min((time - state.prevTime) / 1000, 0.05) : 1 / 60;
+    state.prevTime = time;
+
+    // --- Update sweep beam ---
+    sweep.x += sweep.speed * dt;
+    if (sweep.x > 1) sweep.x -= 1;
+
+    // --- Update star drift ---
+    for (const star of stars) {
+      star.x += star.driftVx;
+      star.y += star.driftVy;
+      if (star.x < 0.01 || star.x > 0.99) star.driftVx *= -1;
+      if (star.y < 0.01 || star.y > 0.99) star.driftVy *= -1;
+      star.x = Math.max(0.01, Math.min(0.99, star.x));
+      star.y = Math.max(0.01, Math.min(0.99, star.y));
+    }
+
+    // --- Trigger stars entering the beam ---
+    const newInBeam = new Set();
+    for (const star of stars) {
+      const beamDist = Math.abs(star.x - sweep.x);
+      const wrapped = Math.min(beamDist, 1 - beamDist);
+      if (wrapped < BEAM_WIDTH) {
+        newInBeam.add(star.id);
+        if (!state.starsInBeam.has(star.id)) {
+          triggerStar(ctx, activeVoices, star, 1.0);
+          // Sympathetic resonance for connected stars
+          for (const connId of star.connections) {
+            const conn = stars.find(s => s.id === connId);
+            if (conn && !newInBeam.has(connId) && !activeVoices.has(connId)) {
+              triggerStar(ctx, activeVoices, conn, 0.12);
+            }
+          }
+        }
+      }
+    }
+    state.starsInBeam = newInBeam;
+
+    // --- Clean up finished voices ---
+    const audioNow = ctx.audio.currentTime;
+    for (const [id, voice] of activeVoices) {
+      if (audioNow > voice.endTime) {
+        try { voice.envelope.disconnect(); } catch (e) { /* ok */ }
+        activeVoices.delete(id);
+      }
+    }
+
+    // --- Draw ---
+    ctx2d.fillStyle = '#000';
+    ctx2d.fillRect(0, 0, width, height);
+
+    // Background star noise
+    for (const bg of bgStars) {
+      const twinkle = 0.5 + 0.5 * Math.sin(time / 1000 * bg.speed + bg.phase);
+      ctx2d.globalAlpha = bg.alpha * twinkle;
+      ctx2d.fillStyle = '#fff';
+      ctx2d.fillRect(bg.x * width, bg.y * height, bg.size, bg.size);
+    }
+    ctx2d.globalAlpha = 1;
+
+    // Sweep beam
+    const beamX = sweep.x * width;
+    const beamHalf = BEAM_WIDTH * width * 3;
+    const beamGrad = ctx2d.createLinearGradient(beamX - beamHalf, 0, beamX + beamHalf, 0);
+    beamGrad.addColorStop(0, 'rgba(80, 130, 255, 0)');
+    beamGrad.addColorStop(0.4, 'rgba(80, 130, 255, 0.04)');
+    beamGrad.addColorStop(0.5, 'rgba(100, 160, 255, 0.1)');
+    beamGrad.addColorStop(0.6, 'rgba(80, 130, 255, 0.04)');
+    beamGrad.addColorStop(1, 'rgba(80, 130, 255, 0)');
+    ctx2d.fillStyle = beamGrad;
+    ctx2d.fillRect(beamX - beamHalf, 0, beamHalf * 2, height);
+
+    // Constellation lines
+    ctx2d.lineWidth = 1;
+    for (const star of stars) {
+      for (const connId of star.connections) {
+        if (connId > star.id) {
+          const other = stars.find(s => s.id === connId);
+          if (other) {
+            const bothActive = activeVoices.has(star.id) && activeVoices.has(other.id);
+            ctx2d.strokeStyle = bothActive
+              ? 'rgba(120, 170, 255, 0.25)'
+              : 'rgba(80, 120, 200, 0.1)';
+            ctx2d.beginPath();
+            ctx2d.moveTo(star.x * width, star.y * height);
+            ctx2d.lineTo(other.x * width, other.y * height);
+            ctx2d.stroke();
+          }
+        }
+      }
+    }
+
+    // Stars
+    for (const star of stars) {
+      const sx = star.x * width;
+      const sy = star.y * height;
+      const active = activeVoices.has(star.id);
+      const b = star.brightness;
+      const baseR = 2 + b * 4;
+      const glowR = baseR * (active ? 8 : 4);
+
+      // Glow
+      const grad = ctx2d.createRadialGradient(sx, sy, 0, sx, sy, glowR);
+      const ga = b * (active ? 0.5 : 0.2);
+      grad.addColorStop(0, `rgba(180, 210, 255, ${ga})`);
+      grad.addColorStop(0.3, `rgba(120, 160, 255, ${ga * 0.4})`);
+      grad.addColorStop(1, 'rgba(80, 120, 255, 0)');
+      ctx2d.fillStyle = grad;
+      ctx2d.beginPath();
+      ctx2d.arc(sx, sy, glowR, 0, Math.PI * 2);
+      ctx2d.fill();
+
+      // Core
+      ctx2d.fillStyle = `rgba(220, 235, 255, ${active ? 1 : 0.7 + b * 0.3})`;
+      ctx2d.beginPath();
+      ctx2d.arc(sx, sy, baseR, 0, Math.PI * 2);
+      ctx2d.fill();
+    }
+
+    // Instructions (fade out after a few seconds)
+    if (time < 7000) {
+      const alpha = time < 4000 ? 0.5 : 0.5 * (1 - (time - 4000) / 3000);
+      if (alpha > 0.01) {
+        ctx2d.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+        ctx2d.font = '14px system-ui';
+        ctx2d.textAlign = 'center';
+        ctx2d.fillText('click to place stars \u2022 double-click to remove \u2022 scroll to change speed', width / 2, 40);
+        ctx2d.textAlign = 'start';
+      }
+    }
+  },
+
+  teardown(ctx, state) {
+    for (const [, voice] of state.activeVoices) {
+      for (const osc of voice.oscillators) {
+        try { osc.stop(); } catch (e) { /* already stopped */ }
+      }
+    }
+    state.activeVoices.clear();
+  },
+
+  options: {
+    visual: 'canvas2d',
+    inputs: ['pointer', 'keyboard'],
+    background: '#000',
+    permalink: {
+      getState() {
+        if (sharedStars.length === 0) return {};
+        const compact = sharedStars.map(s => [
+          Math.round(s.x * 1000) / 1000,
+          Math.round(s.y * 1000) / 1000,
+          Math.round(s.brightness * 100) / 100,
+        ]);
+        return { s: btoa(JSON.stringify(compact)) };
+      },
+      setState(params) {
+        if (!params.s) return;
+        try {
+          const data = JSON.parse(atob(params.s));
+          sharedStars.length = 0;
+          for (let i = 0; i < data.length; i++) {
+            sharedStars.push(makeStar(i, data[i][0], data[i][1], data[i][2]));
+          }
+          nextStarId = data.length;
+        } catch (e) {
+          console.warn('Failed to restore constellation:', e);
+        }
+      },
+    },
+  },
+});
+</script>
+</body>
+</html>
