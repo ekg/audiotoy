@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Theremin</title>
+</head>
+<body>
+<script type="module">
+import { createToy } from '../lib/toy.js';
+
+createToy({
+  name: 'Theremin',
+  description: 'Move your finger or mouse to play. X controls pitch, Y controls volume. Multi-touch creates multiple voices. Press keys A-G to change the base octave.',
+
+  setup(ctx) {
+    // State: one oscillator + gain per active pointer
+    const voices = new Map();
+    const baseOctave = { value: 4 };
+
+    // Frequency range: C3 to C6 (130 Hz – 1047 Hz)
+    const minFreq = 130.81;
+    const maxFreq = 1046.50;
+
+    return { voices, baseOctave, minFreq, maxFreq };
+  },
+
+  onInput(ctx, state, event) {
+    const { voices, minFreq, maxFreq } = state;
+
+    switch (event.type) {
+      case 'pointer-down': {
+        // Create a new voice for this pointer
+        const osc = ctx.audio.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = minFreq;
+
+        const gain = ctx.audio.createGain();
+        gain.gain.value = 0;
+
+        osc.connect(gain);
+        ctx.connect(gain);
+        osc.start();
+
+        // Smooth the frequency and gain to avoid clicks
+        const freq = xToFreq(event.x, minFreq, maxFreq);
+        const vol = 1 - event.y; // Top = loud, bottom = quiet
+        osc.frequency.setTargetAtTime(freq, ctx.currentTime, 0.01);
+        gain.gain.setTargetAtTime(Math.max(0, Math.min(1, vol)) * 0.3, ctx.currentTime, 0.02);
+
+        voices.set(event.pointerId, { osc, gain, x: event.x, y: event.y });
+        break;
+      }
+
+      case 'pointer-move': {
+        const voice = voices.get(event.pointerId);
+        if (!voice) break;
+
+        const freq = xToFreq(event.x, minFreq, maxFreq);
+        const vol = 1 - event.y;
+
+        voice.osc.frequency.setTargetAtTime(freq, ctx.currentTime, 0.01);
+        voice.gain.gain.setTargetAtTime(Math.max(0, Math.min(1, vol)) * 0.3, ctx.currentTime, 0.02);
+        voice.x = event.x;
+        voice.y = event.y;
+        break;
+      }
+
+      case 'pointer-up': {
+        const voice = voices.get(event.pointerId);
+        if (!voice) break;
+
+        // Fade out then stop
+        voice.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.05);
+        voice.osc.stop(ctx.currentTime + 0.2);
+        voices.delete(event.pointerId);
+        break;
+      }
+
+      case 'key-down': {
+        // Change waveform with number keys
+        const waveforms = { Digit1: 'sine', Digit2: 'triangle', Digit3: 'sawtooth', Digit4: 'square' };
+        if (waveforms[event.key]) {
+          for (const voice of voices.values()) {
+            voice.osc.type = waveforms[event.key];
+          }
+        }
+        break;
+      }
+    }
+  },
+
+  render(ctx, state, time) {
+    const { ctx2d, width, height, analyser } = ctx;
+    const { voices } = state;
+
+    // Clear
+    ctx2d.fillStyle = '#0a0a1a';
+    ctx2d.fillRect(0, 0, width, height);
+
+    // Draw waveform from analyser
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Float32Array(bufferLength);
+    analyser.getFloatTimeDomainData(dataArray);
+
+    ctx2d.strokeStyle = 'rgba(100, 200, 255, 0.4)';
+    ctx2d.lineWidth = 1.5;
+    ctx2d.beginPath();
+    const sliceWidth = width / bufferLength;
+    let x = 0;
+    for (let i = 0; i < bufferLength; i++) {
+      const y = (dataArray[i] * 0.5 + 0.5) * height;
+      if (i === 0) ctx2d.moveTo(x, y);
+      else ctx2d.lineTo(x, y);
+      x += sliceWidth;
+    }
+    ctx2d.stroke();
+
+    // Draw frequency guides (horizontal lines at octave boundaries)
+    ctx2d.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+    ctx2d.lineWidth = 1;
+    const notes = [130.81, 261.63, 523.25, 1046.50];
+    const labels = ['C3', 'C4', 'C5', 'C6'];
+    for (let i = 0; i < notes.length; i++) {
+      const nx = freqToX(notes[i], state.minFreq, state.maxFreq) * width;
+      ctx2d.beginPath();
+      ctx2d.moveTo(nx, 0);
+      ctx2d.lineTo(nx, height);
+      ctx2d.stroke();
+      ctx2d.fillStyle = 'rgba(255, 255, 255, 0.15)';
+      ctx2d.font = '12px system-ui';
+      ctx2d.fillText(labels[i], nx + 4, height - 50);
+    }
+
+    // Draw active voices as glowing circles
+    for (const [id, voice] of voices) {
+      const vx = voice.x * width;
+      const vy = voice.y * height;
+      const vol = (1 - voice.y);
+      const radius = 15 + vol * 30;
+
+      // Glow
+      const gradient = ctx2d.createRadialGradient(vx, vy, 0, vx, vy, radius * 2);
+      gradient.addColorStop(0, `rgba(100, 200, 255, ${0.6 * vol})`);
+      gradient.addColorStop(0.5, `rgba(100, 200, 255, ${0.2 * vol})`);
+      gradient.addColorStop(1, 'rgba(100, 200, 255, 0)');
+      ctx2d.fillStyle = gradient;
+      ctx2d.beginPath();
+      ctx2d.arc(vx, vy, radius * 2, 0, Math.PI * 2);
+      ctx2d.fill();
+
+      // Core dot
+      ctx2d.fillStyle = `rgba(200, 240, 255, ${0.8 + 0.2 * Math.sin(time / 200)})`;
+      ctx2d.beginPath();
+      ctx2d.arc(vx, vy, 5, 0, Math.PI * 2);
+      ctx2d.fill();
+    }
+
+    // Instructions (fade out after a few seconds)
+    const fadeStart = 3000;
+    const fadeDuration = 2000;
+    const elapsed = time;
+    if (elapsed < fadeStart + fadeDuration) {
+      const alpha = elapsed < fadeStart ? 0.5 : 0.5 * (1 - (elapsed - fadeStart) / fadeDuration);
+      if (alpha > 0.01) {
+        ctx2d.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+        ctx2d.font = '14px system-ui';
+        ctx2d.textAlign = 'center';
+        ctx2d.fillText('move to play \u2022 1-4 change waveform', width / 2, 40);
+        ctx2d.textAlign = 'start';
+      }
+    }
+  },
+
+  teardown(ctx, state) {
+    for (const voice of state.voices.values()) {
+      voice.osc.stop();
+    }
+    state.voices.clear();
+  },
+
+  options: {
+    visual: 'canvas2d',
+    inputs: ['pointer', 'keyboard'],
+    background: '#0a0a1a',
+  },
+});
+
+// Helpers — exponential frequency mapping for musical pitch
+function xToFreq(x, minFreq, maxFreq) {
+  return minFreq * Math.pow(maxFreq / minFreq, Math.max(0, Math.min(1, x)));
+}
+
+function freqToX(freq, minFreq, maxFreq) {
+  return Math.log(freq / minFreq) / Math.log(maxFreq / minFreq);
+}
+</script>
+</body>
+</html>

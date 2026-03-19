@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>My Audio Toy</title>
+</head>
+<body>
+<script type="module">
+import { createToy } from './lib/toy.js';
+
+createToy({
+  name: 'My Audio Toy',
+  description: 'Describe how to interact with this toy.',
+
+  setup(ctx) {
+    // Called once after the user taps "start" and audio is ready.
+    //
+    // ctx.audio         - AudioContext
+    // ctx.masterGain    - GainNode (master volume)
+    // ctx.analyser      - AnalyserNode (for visualization)
+    // ctx.connect(node) - Connect an audio node to the output chain
+    // ctx.sampleRate    - Audio sample rate (e.g. 48000)
+    // ctx.canvas        - HTMLCanvasElement
+    // ctx.ctx2d         - CanvasRenderingContext2D (if visual='canvas2d')
+    // ctx.gl            - WebGLRenderingContext (if visual='webgl')
+    // ctx.width/height  - Canvas CSS dimensions
+    // ctx.pointers      - Map of active pointers
+    // ctx.keys          - Set of held key codes
+    // ctx.capabilities  - { webAudio, audioWorklet, sharedArrayBuffer, wasm }
+    //
+    // Return any state your toy needs. It will be passed to onInput/render/teardown.
+
+    return {};
+  },
+
+  onInput(ctx, state, event) {
+    // Called for every input event.
+    //
+    // event.type: 'pointer-down'|'pointer-move'|'pointer-up'|'key-down'|'key-up'|'midi'|'motion'
+    // event.x, event.y: normalized 0-1 coordinates (pointer events)
+    // event.pointerId: unique pointer ID (pointer events)
+    // event.pressure: 0-1 touch/pen pressure
+    // event.key: physical key code like 'KeyA', 'Space' (key events)
+    // event.midiData: Uint8Array raw MIDI bytes (midi events)
+    // event.motion: { alpha, beta, gamma } (motion events)
+  },
+
+  render(ctx, state, time) {
+    // Called every animation frame (~60fps).
+    //
+    // time: DOMHighResTimeStamp from requestAnimationFrame
+    // ctx.ctx2d or ctx.gl: use to draw
+    // ctx.width/height: current canvas dimensions
+    // ctx.analyser: use getFloatTimeDomainData/getFloatFrequencyData for audio visualization
+  },
+
+  teardown(ctx, state) {
+    // Called when the toy is destroyed. Stop oscillators, release resources.
+  },
+
+  options: {
+    visual: 'canvas2d',          // 'canvas2d' | 'webgl' | 'none'
+    inputs: ['pointer', 'keyboard'],  // 'pointer' | 'keyboard' | 'mic' | 'midi' | 'motion'
+    background: '#000',
+  },
+});
+</script>
+</body>
+</html>
