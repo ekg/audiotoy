@@ -417,8 +417,24 @@ async function captureAudio(url, durationSec) {
   // Begin capture
   await page.evaluate(() => { window.__audioCapture.capturing = true; });
 
-  // Simulate interaction: pointer drag + keyboard presses
+  // Simulate interaction: clicks + pointer drag + keyboard presses
   const w = 1280, h = 720;
+
+  // Short clicks at various positions — needed for toys that respond to
+  // click-to-place events (e.g. Constellation Engine) rather than drags.
+  const clickPositions = [
+    { x: w * 0.3, y: h * 0.3 },
+    { x: w * 0.5, y: h * 0.5 },
+    { x: w * 0.7, y: h * 0.2 },
+    { x: w * 0.4, y: h * 0.7 },
+    { x: w * 0.6, y: h * 0.6 },
+  ];
+  for (const pos of clickPositions) {
+    await page.mouse.click(pos.x, pos.y);
+    await page.waitForTimeout(300);
+  }
+
+  // Sustained drag for theremin-style toys
   await page.mouse.move(w * 0.5, h * 0.4);
   await page.mouse.down();
 
