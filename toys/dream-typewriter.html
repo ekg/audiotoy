@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Dream Typewriter</title>
+</head>
+<body>
+<script type="module">
+import { createToy } from '../scaffold/lib/toy.js';
+
+// ── Musical constants ──────────────────────────────────────────────
+
+// Pentatonic scale degrees (semitones from root): C D E G A
+const PENTATONIC = [0, 2, 4, 7, 9];
+
+// Map letter index (0-25) to a pentatonic note across ~2 octaves
+function letterToPitch(letter) {
+  const idx = letter.toUpperCase().charCodeAt(0) - 65; // 0-25
+  if (idx < 0 || idx > 25) return 261.63; // fallback to C4
+  const octaveBase = 48 + Math.floor(idx / 5) * 12; // MIDI note, starting at C3
+  const degree = PENTATONIC[idx % 5];
+  const midiNote = octaveBase + degree;
+  return 440 * Math.pow(2, (midiNote - 69) / 12);
+}
+
+// Vowel formant frequencies (F1, F2) for the five basic vowels
+const FORMANTS = {
+  a: { f1: 800, f2: 1200, q1: 8, q2: 6 },   // "ah"
+  e: { f1: 400, f2: 2200, q1: 8, q2: 6 },   // "eh"
+  i: { f1: 280, f2: 2600, q1: 10, q2: 8 },  // "ee"
+  o: { f1: 500, f2: 900, q1: 8, q2: 6 },    // "oh"
+  u: { f1: 350, f2: 800, q1: 10, q2: 8 },   // "oo"
+};
+
+const VOWELS = new Set('aeiouAEIOU');
+
+// Color palette
+function vowelColor(letter) {
+  const colors = { a: '#ff6b4a', e: '#ff9f43', i: '#ffd93d', o: '#6bcb77', u: '#4d96ff' };
+  return colors[letter.toLowerCase()] || '#ff6b4a';
+}
+
+function consonantColor() {
+  return '#b8c0cc';
+}
+
+function punctuationColor() {
+  return '#e0a0ff';
+}
+
+function letterColor(char) {
+  if (VOWELS.has(char)) return vowelColor(char);
+  if (/[a-zA-Z]/.test(char)) return consonantColor();
+  if (/[.,!?;:\-]/.test(char)) return punctuationColor();
+  return '#666';
+}
+
+// ── Audio helpers ──────────────────────────────────────────────────
+
+function createNoiseBuffer(audioCtx, duration) {
+  const length = audioCtx.sampleRate * duration;
+  const buffer = audioCtx.createBuffer(1, length, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < length; i++) {
+    data[i] = Math.random() * 2 - 1;
+  }
+  return buffer;
+}
+
+function playVowel(ctx, letter, shiftHeld) {
+  const audio = ctx.audio;
+  const t = audio.currentTime;
+  const freq = letterToPitch(letter);
+  const formant = FORMANTS[letter.toLowerCase()];
+
+  // Source: sawtooth oscillator
+  const osc = audio.createOscillator();
+  osc.type = 'sawtooth';
+  osc.frequency.value = freq;
+
+  // Two bandpass filters for formants
+  const bp1 = audio.createBiquadFilter();
+  bp1.type = 'bandpass';
+  bp1.frequency.value = formant.f1;
+  bp1.Q.value = formant.q1;
+
+  const bp2 = audio.createBiquadFilter();
+  bp2.type = 'bandpass';
+  bp2.frequency.value = formant.f2;
+  bp2.Q.value = formant.q2;
+
+  // Gain nodes for each formant path
+  const g1 = audio.createGain();
+  g1.gain.value = 0.5;
+  const g2 = audio.createGain();
+  g2.gain.value = 0.3;
+
+  // Mix node
+  const mix = audio.createGain();
+  const volume = shiftHeld ? 0.25 : 0.15;
+
+  // ADSR-ish envelope
+  mix.gain.setValueAtTime(0, t);
+  mix.gain.linearRampToValueAtTime(volume, t + 0.03);       // attack
+  mix.gain.linearRampToValueAtTime(volume * 0.7, t + 0.12); // decay to sustain
+  mix.gain.linearRampToValueAtTime(volume * 0.6, t + 0.35); // sustain
+  mix.gain.linearRampToValueAtTime(0, t + 0.5);             // release
+
+  // Shift modifies timbre: brighter
+  if (shiftHeld) {
+    bp1.frequency.value = formant.f1 * 1.2;
+    bp2.frequency.value = formant.f2 * 1.15;
+  }
+
+  // Connect: osc → bp1 → g1 → mix, osc → bp2 → g2 → mix
+  osc.connect(bp1);
+  bp1.connect(g1);
+  g1.connect(mix);
+
+  osc.connect(bp2);
+  bp2.connect(g2);
+  g2.connect(mix);
+
+  ctx.connect(mix);
+
+  osc.start(t);
+  osc.stop(t + 0.55);
+
+  return { stopTime: t + 0.55 };
+}
+
+function playConsonant(ctx, letter, noiseBuffer, shiftHeld) {
+  const audio = ctx.audio;
+  const t = audio.currentTime;
+
+  const source = audio.createBufferSource();
+  source.buffer = noiseBuffer;
+
+  const filter = audio.createBiquadFilter();
+  const gain = audio.createGain();
+
+  // Classify consonant type for different timbres
+  const code = letter.toUpperCase().charCodeAt(0);
+  const plosives = new Set('BPDTGK');
+  const fricatives = new Set('FVSZHX');
+  const nasals = new Set('MNL');
+
+  const volume = shiftHeld ? 0.3 : 0.18;
+
+  if (plosives.has(letter.toUpperCase())) {
+    // Short broadband burst
+    filter.type = 'highpass';
+    filter.frequency.value = 800 + (code % 10) * 200;
+    filter.Q.value = 1;
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(volume, t + 0.005);
+    gain.gain.linearRampToValueAtTime(0, t + 0.06);
+    source.start(t);
+    source.stop(t + 0.08);
+  } else if (fricatives.has(letter.toUpperCase())) {
+    // Filtered noise, longer
+    filter.type = 'bandpass';
+    filter.frequency.value = 3000 + (code % 8) * 500;
+    filter.Q.value = 3;
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(volume * 0.7, t + 0.01);
+    gain.gain.linearRampToValueAtTime(volume * 0.5, t + 0.08);
+    gain.gain.linearRampToValueAtTime(0, t + 0.15);
+    source.start(t);
+    source.stop(t + 0.18);
+  } else if (nasals.has(letter.toUpperCase())) {
+    // Low-frequency resonance
+    filter.type = 'lowpass';
+    filter.frequency.value = 400 + (code % 5) * 100;
+    filter.Q.value = 8;
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(volume * 0.8, t + 0.02);
+    gain.gain.linearRampToValueAtTime(volume * 0.5, t + 0.12);
+    gain.gain.linearRampToValueAtTime(0, t + 0.2);
+    source.start(t);
+    source.stop(t + 0.25);
+  } else {
+    // Generic consonant
+    filter.type = 'bandpass';
+    filter.frequency.value = 1500 + (code % 12) * 300;
+    filter.Q.value = 2;
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(volume * 0.6, t + 0.01);
+    gain.gain.linearRampToValueAtTime(0, t + 0.1);
+    source.start(t);
+    source.stop(t + 0.12);
+  }
+
+  source.connect(filter);
+  filter.connect(gain);
+  ctx.connect(gain);
+}
+
+function playPunctuation(ctx, char, noiseBuffer) {
+  const audio = ctx.audio;
+  const t = audio.currentTime;
+
+  if (char === ',') {
+    // Breath: gentle noise exhale
+    const source = audio.createBufferSource();
+    source.buffer = noiseBuffer;
+    const filter = audio.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 600;
+    filter.Q.value = 1;
+    const gain = audio.createGain();
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.04, t + 0.05);
+    gain.gain.linearRampToValueAtTime(0, t + 0.25);
+    source.connect(filter);
+    filter.connect(gain);
+    ctx.connect(gain);
+    source.start(t);
+    source.stop(t + 0.3);
+  } else if (char === '.') {
+    // Cadence: low tone descending
+    const osc = audio.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(220, t);
+    osc.frequency.linearRampToValueAtTime(110, t + 0.3);
+    const gain = audio.createGain();
+    gain.gain.setValueAtTime(0.1, t);
+    gain.gain.linearRampToValueAtTime(0, t + 0.35);
+    osc.connect(gain);
+    ctx.connect(gain);
+    osc.start(t);
+    osc.stop(t + 0.4);
+  } else if (char === '?') {
+    // Rising interval
+    const osc = audio.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(330, t);
+    osc.frequency.linearRampToValueAtTime(660, t + 0.25);
+    const gain = audio.createGain();
+    gain.gain.setValueAtTime(0.08, t);
+    gain.gain.linearRampToValueAtTime(0.1, t + 0.15);
+    gain.gain.linearRampToValueAtTime(0, t + 0.35);
+    osc.connect(gain);
+    ctx.connect(gain);
+    osc.start(t);
+    osc.stop(t + 0.4);
+  } else if (char === '!') {
+    // Exclamation: sharp accent
+    const osc = audio.createOscillator();
+    osc.type = 'square';
+    osc.frequency.value = 440;
+    const gain = audio.createGain();
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.15, t + 0.01);
+    gain.gain.linearRampToValueAtTime(0, t + 0.15);
+    osc.connect(gain);
+    ctx.connect(gain);
+    osc.start(t);
+    osc.stop(t + 0.2);
+  } else if (char === ';' || char === ':') {
+    // Soft pause
+    const osc = audio.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = 196;
+    const gain = audio.createGain();
+    gain.gain.setValueAtTime(0.05, t);
+    gain.gain.linearRampToValueAtTime(0, t + 0.2);
+    osc.connect(gain);
+    ctx.connect(gain);
+    osc.start(t);
+    osc.stop(t + 0.25);
+  } else if (char === '-') {
+    // Dash: bridging tone
+    const osc = audio.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = 262;
+    const gain = audio.createGain();
+    gain.gain.setValueAtTime(0.04, t);
+    gain.gain.linearRampToValueAtTime(0.04, t + 0.15);
+    gain.gain.linearRampToValueAtTime(0, t + 0.25);
+    osc.connect(gain);
+    ctx.connect(gain);
+    osc.start(t);
+    osc.stop(t + 0.3);
+  }
+}
+
+// ── Visual data structures ──────────────────────────────────────────
+
+class TypedLetter {
+  constructor(char, x, y, color, time) {
+    this.char = char;
+    this.x = x;
+    this.y = y;
+    this.color = color;
+    this.birthTime = time;
+    this.pulse = 1.0;
+    this.opacity = 1.0;
+    this.driftY = 0;
+    this.wordComplete = false;
+    this.fontSize = 32;
+  }
+}
+
+// ── On-screen keyboard ──────────────────────────────────────────────
+
+const KB_ROWS = [
+  'QWERTYUIOP',
+  'ASDFGHJKL',
+  'ZXCVBNM',
+];
+const KB_SPECIAL = [' ', '.', ',', '?', '!', '⌫'];
+
+// ── Main toy ──────────────────────────────────────────────────────
+
+createToy({
+  name: 'Dream Typewriter',
+  description: 'Type freely — every letter has a sound. Vowels sing, consonants click, spaces rest, punctuation punctuates. Shift for brighter timbre.',
+
+  setup(ctx) {
+    const noiseBuffer = createNoiseBuffer(ctx.audio, 0.5);
+
+    // Detect touch device for on-screen keyboard
+    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+    return {
+      noiseBuffer,
+      letters: [],           // TypedLetter[] — all typed characters
+      currentWord: [],        // TypedLetter[] — letters in current word
+      cursorX: 40,            // current typing x position
+      cursorY: 0,             // set in render based on canvas size
+      lineHeight: 40,
+      shiftHeld: false,
+      isTouchDevice,
+      showKeyboard: isTouchDevice,
+      kbHighlight: null,      // key being pressed on on-screen keyboard
+      kbHighlightTime: 0,
+    };
+  },
+
+  onInput(ctx, state, event) {
+    if (event.type === 'key-down') {
+      handleKey(ctx, state, event.key, performance.now());
+    } else if (event.type === 'key-up') {
+      if (event.key === 'ShiftLeft' || event.key === 'ShiftRight') {
+        state.shiftHeld = false;
+      }
+    } else if (event.type === 'pointer-down' && state.showKeyboard) {
+      // Check on-screen keyboard hit
+      const hitKey = getKeyboardHit(ctx, state, event.x * ctx.width, event.y * ctx.height);
+      if (hitKey) {
+        state.kbHighlight = hitKey;
+        state.kbHighlightTime = performance.now();
+        if (hitKey === '⌫') {
+          handleKey(ctx, state, 'Backspace', performance.now());
+        } else if (hitKey === ' ') {
+          handleKey(ctx, state, 'Space', performance.now());
+        } else if (hitKey === '.') {
+          handleKey(ctx, state, 'Period', performance.now());
+        } else if (hitKey === ',') {
+          handleKey(ctx, state, 'Comma', performance.now());
+        } else if (hitKey === '?') {
+          handleKey(ctx, state, 'Slash', performance.now()); // treat as ?
+        } else if (hitKey === '!') {
+          handleKey(ctx, state, 'Digit1', performance.now()); // treat as !
+        } else {
+          handleKey(ctx, state, 'Key' + hitKey.toUpperCase(), performance.now());
+        }
+      }
+    }
+  },
+
+  render(ctx, state, time) {
+    const { ctx2d, width, height } = ctx;
+
+    // Initialize cursor Y position
+    if (state.cursorY === 0) {
+      state.cursorY = state.showKeyboard ? height * 0.35 : height * 0.55;
+    }
+
+    // Clear
+    ctx2d.fillStyle = '#0d0d1a';
+    ctx2d.fillRect(0, 0, width, height);
+
+    // Draw drifting completed-word letters (behind current text)
+    for (const letter of state.letters) {
+      if (!letter.wordComplete) continue;
+      const age = (time - letter.birthTime) / 1000;
+      letter.driftY = age * 25; // drift upward
+      letter.opacity = Math.max(0, 1 - age / 8);
+      if (letter.opacity <= 0) continue;
+
+      const pulseScale = 1 + 0.05 * Math.sin(time / 300 + letter.x * 0.1);
+      ctx2d.save();
+      ctx2d.globalAlpha = letter.opacity * 0.6;
+      ctx2d.font = `${letter.fontSize * pulseScale}px 'Courier New', monospace`;
+      ctx2d.fillStyle = letter.color;
+      ctx2d.fillText(letter.char, letter.x, letter.y - letter.driftY);
+      ctx2d.restore();
+    }
+
+    // Draw current word letters (active, pulsing)
+    for (const letter of state.currentWord) {
+      const age = (time - letter.birthTime) / 1000;
+      const pulseIntensity = Math.max(0, 1 - age / 0.5);
+      const scale = 1 + 0.15 * pulseIntensity * Math.sin(time / 80);
+      const glowAlpha = 0.4 * pulseIntensity;
+
+      ctx2d.save();
+
+      // Glow effect
+      if (glowAlpha > 0.01) {
+        ctx2d.shadowColor = letter.color;
+        ctx2d.shadowBlur = 15 * pulseIntensity;
+      }
+
+      ctx2d.font = `${letter.fontSize * scale}px 'Courier New', monospace`;
+      ctx2d.fillStyle = letter.color;
+      ctx2d.globalAlpha = 1;
+      ctx2d.fillText(letter.char, letter.x, letter.y);
+      ctx2d.restore();
+    }
+
+    // Draw cursor blink
+    const blink = Math.sin(time / 400) > 0;
+    if (blink) {
+      ctx2d.fillStyle = 'rgba(255, 255, 255, 0.6)';
+      ctx2d.fillRect(state.cursorX, state.cursorY - 24, 2, 28);
+    }
+
+    // Clean up fully faded letters
+    state.letters = state.letters.filter(l => !l.wordComplete || l.opacity > 0);
+
+    // Draw on-screen keyboard if enabled
+    if (state.showKeyboard) {
+      drawKeyboard(ctx, state, time);
+    }
+
+    // Subtle instruction text (fades out)
+    if (time < 5000) {
+      const alpha = time < 3000 ? 0.5 : 0.5 * (1 - (time - 3000) / 2000);
+      if (alpha > 0.01) {
+        ctx2d.save();
+        ctx2d.globalAlpha = alpha;
+        ctx2d.fillStyle = '#888';
+        ctx2d.font = '14px system-ui, sans-serif';
+        ctx2d.textAlign = 'center';
+        ctx2d.fillText('type to play \u2022 vowels sing \u2022 consonants click \u2022 shift for brighter', width / 2, 30);
+        ctx2d.textAlign = 'start';
+        ctx2d.restore();
+      }
+    }
+  },
+
+  teardown(ctx, state) {
+    // No persistent audio nodes to clean up — all are fire-and-forget
+  },
+
+  options: {
+    visual: 'canvas2d',
+    inputs: ['pointer', 'keyboard'],
+    background: '#0d0d1a',
+  },
+});
+
+// ── Input handling ──────────────────────────────────────────────────
+
+function handleKey(ctx, state, keyCode, time) {
+  // Shift
+  if (keyCode === 'ShiftLeft' || keyCode === 'ShiftRight') {
+    state.shiftHeld = true;
+    return;
+  }
+
+  // Backspace: remove last letter
+  if (keyCode === 'Backspace') {
+    if (state.currentWord.length > 0) {
+      const removed = state.currentWord.pop();
+      state.cursorX = removed.x;
+      // Remove from letters array too
+      const idx = state.letters.indexOf(removed);
+      if (idx >= 0) state.letters.splice(idx, 1);
+    }
+    return;
+  }
+
+  // Map keyCode to character
+  let char = null;
+
+  if (keyCode === 'Space') {
+    // Space = rest, complete current word
+    completeWord(state, time);
+    state.cursorX += 20;
+    wrapIfNeeded(ctx, state);
+    return;
+  }
+
+  if (keyCode === 'Enter') {
+    completeWord(state, time);
+    state.cursorX = 40;
+    state.cursorY += state.lineHeight;
+    wrapIfNeeded(ctx, state);
+    return;
+  }
+
+  // Letter keys
+  if (keyCode.startsWith('Key')) {
+    char = keyCode.slice(3).toLowerCase();
+    if (state.shiftHeld) char = char.toUpperCase();
+  }
+  // Punctuation
+  else if (keyCode === 'Period') char = '.';
+  else if (keyCode === 'Comma') char = ',';
+  else if (keyCode === 'Slash') char = '?';
+  else if (keyCode === 'Digit1' && state.shiftHeld) char = '!';
+  else if (keyCode === 'Semicolon') char = state.shiftHeld ? ':' : ';';
+  else if (keyCode === 'Minus') char = '-';
+  // On-screen keyboard specials
+  else if (keyCode === 'Digit1') char = '!';
+
+  if (!char) return;
+
+  // Play sound
+  if (VOWELS.has(char)) {
+    playVowel(ctx, char, state.shiftHeld);
+  } else if (/[a-zA-Z]/.test(char)) {
+    playConsonant(ctx, char, state.noiseBuffer, state.shiftHeld);
+  } else if (/[.,!?;:\-]/.test(char)) {
+    playPunctuation(ctx, char, state.noiseBuffer);
+  }
+
+  // Add visual letter
+  const color = letterColor(char);
+  const letter = new TypedLetter(char, state.cursorX, state.cursorY, color, time);
+  state.letters.push(letter);
+  state.currentWord.push(letter);
+
+  state.cursorX += 22;
+  wrapIfNeeded(ctx, state);
+}
+
+function completeWord(state, time) {
+  for (const letter of state.currentWord) {
+    letter.wordComplete = true;
+    letter.birthTime = time; // reset for drift animation
+  }
+  state.currentWord = [];
+}
+
+function wrapIfNeeded(ctx, state) {
+  const maxX = state.showKeyboard ? ctx.width - 40 : ctx.width - 40;
+  if (state.cursorX > maxX) {
+    state.cursorX = 40;
+    state.cursorY += state.lineHeight;
+  }
+  // If we've gone too far down, reset to top area
+  const maxY = state.showKeyboard ? ctx.height * 0.5 : ctx.height - 60;
+  if (state.cursorY > maxY) {
+    // Complete all current words and reset
+    completeWord(state, performance.now());
+    state.cursorX = 40;
+    state.cursorY = state.showKeyboard ? ctx.height * 0.12 : ctx.height * 0.2;
+  }
+}
+
+// ── On-screen keyboard ──────────────────────────────────────────────
+
+function getKeyboardLayout(ctx, state) {
+  const kbHeight = ctx.height * 0.42;
+  const kbTop = ctx.height - kbHeight;
+  const keyW = Math.min(ctx.width / 11 - 4, 44);
+  const keyH = Math.min(kbHeight / 5 - 4, 44);
+  const gap = 3;
+
+  return { kbTop, keyW, keyH, gap, kbHeight };
+}
+
+function getKeyboardHit(ctx, state, px, py) {
+  const { kbTop, keyW, keyH, gap } = getKeyboardLayout(ctx, state);
+
+  // Letter rows
+  for (let r = 0; r < KB_ROWS.length; r++) {
+    const row = KB_ROWS[r];
+    const rowY = kbTop + r * (keyH + gap) + gap;
+    const rowOffset = (ctx.width - row.length * (keyW + gap)) / 2;
+    for (let c = 0; c < row.length; c++) {
+      const kx = rowOffset + c * (keyW + gap);
+      if (px >= kx && px < kx + keyW && py >= rowY && py < rowY + keyH) {
+        return row[c];
+      }
+    }
+  }
+
+  // Special row
+  const specialRow = KB_SPECIAL;
+  const specialY = kbTop + 3 * (keyH + gap) + gap;
+  const spaceW = keyW * 4;
+  const specialKeys = [];
+  let totalW = 0;
+  for (const k of specialRow) {
+    const w = k === ' ' ? spaceW : keyW;
+    specialKeys.push({ key: k, w });
+    totalW += w + gap;
+  }
+  let sx = (ctx.width - totalW) / 2;
+  for (const { key, w } of specialKeys) {
+    if (px >= sx && px < sx + w && py >= specialY && py < specialY + keyH) {
+      return key;
+    }
+    sx += w + gap;
+  }
+
+  return null;
+}
+
+function drawKeyboard(ctx, state, time) {
+  const { ctx2d, width, height } = ctx;
+  const { kbTop, keyW, keyH, gap } = getKeyboardLayout(ctx, state);
+
+  // Background
+  ctx2d.fillStyle = 'rgba(20, 20, 35, 0.95)';
+  ctx2d.fillRect(0, kbTop - 10, width, height - kbTop + 10);
+
+  // Separator line
+  ctx2d.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+  ctx2d.beginPath();
+  ctx2d.moveTo(0, kbTop - 10);
+  ctx2d.lineTo(width, kbTop - 10);
+  ctx2d.stroke();
+
+  // Letter rows
+  for (let r = 0; r < KB_ROWS.length; r++) {
+    const row = KB_ROWS[r];
+    const rowY = kbTop + r * (keyH + gap) + gap;
+    const rowOffset = (width - row.length * (keyW + gap)) / 2;
+    for (let c = 0; c < row.length; c++) {
+      const ch = row[c];
+      const kx = rowOffset + c * (keyW + gap);
+      const isHighlighted = state.kbHighlight === ch && (time - state.kbHighlightTime) < 150;
+      drawKey(ctx2d, ch, kx, rowY, keyW, keyH, isHighlighted, letterColor(ch.toLowerCase()));
+    }
+  }
+
+  // Special row
+  const spaceW = keyW * 4;
+  const specialKeys = [];
+  let totalW = 0;
+  for (const k of KB_SPECIAL) {
+    const w = k === ' ' ? spaceW : keyW;
+    specialKeys.push({ key: k, w });
+    totalW += w + gap;
+  }
+  const specialY = kbTop + 3 * (keyH + gap) + gap;
+  let sx = (width - totalW) / 2;
+  for (const { key, w } of specialKeys) {
+    const label = key === ' ' ? 'space' : key;
+    const isHighlighted = state.kbHighlight === key && (time - state.kbHighlightTime) < 150;
+    drawKey(ctx2d, label, sx, specialY, w, keyH, isHighlighted, key === '⌫' ? '#888' : punctuationColor());
+    sx += w + gap;
+  }
+}
+
+function drawKey(ctx2d, label, x, y, w, h, highlighted, accentColor) {
+  // Key background
+  ctx2d.fillStyle = highlighted ? 'rgba(255, 255, 255, 0.2)' : 'rgba(255, 255, 255, 0.06)';
+  ctx2d.beginPath();
+  roundRect(ctx2d, x, y, w, h, 5);
+  ctx2d.fill();
+
+  // Key border
+  ctx2d.strokeStyle = highlighted ? accentColor : 'rgba(255, 255, 255, 0.12)';
+  ctx2d.lineWidth = 1;
+  ctx2d.beginPath();
+  roundRect(ctx2d, x, y, w, h, 5);
+  ctx2d.stroke();
+
+  // Label
+  ctx2d.fillStyle = highlighted ? '#fff' : 'rgba(255, 255, 255, 0.7)';
+  ctx2d.font = `${Math.min(16, h * 0.4)}px system-ui, sans-serif`;
+  ctx2d.textAlign = 'center';
+  ctx2d.textBaseline = 'middle';
+  ctx2d.fillText(label, x + w / 2, y + h / 2);
+  ctx2d.textAlign = 'start';
+  ctx2d.textBaseline = 'alphabetic';
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+}
+</script>
+</body>
+</html>
