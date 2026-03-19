@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Pendulum Choir</title>
+</head>
+<body>
+<script type="module">
+import { createToy } from '../scaffold/lib/toy.js';
+
+// Physics constants
+const G_DEFAULT = 9.81;      // default gravity m/s²
+const MIN_LENGTH = 0.15;     // min pendulum length (normalized 0-1 of screen)
+const MAX_LENGTH = 0.85;
+const NUM_PENDULUMS = 7;
+
+// Musical mapping: pendulum period T = 2π√(L/g)
+// Frequency = 1/T mapped to audible range
+// Shorter pendulum → higher frequency
+const MIN_FREQ = 130;   // ~C3
+const MAX_FREQ = 880;   // ~A5
+
+function lengthToFreq(length, gravity) {
+  // T = 2π√(L/g), freq = 1/T
+  // We map normalized length to a musical frequency range
+  // Shorter = higher pitch
+  const t = (length - MIN_LENGTH) / (MAX_LENGTH - MIN_LENGTH); // 0 (short) to 1 (long)
+  // Exponential mapping: short → high freq, long → low freq
+  return MAX_FREQ * Math.pow(MIN_FREQ / MAX_FREQ, t);
+}
+
+function createPendulum(index, total, ctx, gravity) {
+  const spacing = 1.0 / (total + 1);
+  const anchorX = spacing * (index + 1);
+
+  // Stagger initial lengths for a pleasant spread
+  const lengthSpread = (MAX_LENGTH - MIN_LENGTH) / (total - 1);
+  const length = MIN_LENGTH + lengthSpread * index;
+
+  // Create audio nodes: sine oscillator + 2 harmonics → gain
+  const freq = lengthToFreq(length, gravity);
+
+  const osc1 = ctx.audio.createOscillator();
+  osc1.type = 'sine';
+  osc1.frequency.value = freq;
+
+  const osc2 = ctx.audio.createOscillator();
+  osc2.type = 'sine';
+  osc2.frequency.value = freq * 2; // 2nd partial
+
+  const osc3 = ctx.audio.createOscillator();
+  osc3.type = 'sine';
+  osc3.frequency.value = freq * 3; // 3rd partial
+
+  const gain1 = ctx.audio.createGain();
+  const gain2 = ctx.audio.createGain();
+  const gain3 = ctx.audio.createGain();
+
+  gain1.gain.value = 0;
+  gain2.gain.value = 0;
+  gain3.gain.value = 0;
+
+  const mixGain = ctx.audio.createGain();
+  mixGain.gain.value = 0.12; // overall volume per pendulum
+
+  osc1.connect(gain1);
+  osc2.connect(gain2);
+  osc3.connect(gain3);
+  gain1.connect(mixGain);
+  gain2.connect(mixGain);
+  gain3.connect(mixGain);
+  ctx.connect(mixGain);
+
+  osc1.start();
+  osc2.start();
+  osc3.start();
+
+  return {
+    index,
+    anchorX,         // normalized x position of pivot
+    length,          // normalized pendulum length
+    angle: 0,        // current angle in radians
+    angularVel: 0,   // angular velocity
+    released: false,  // true once user lets go
+    muted: false,
+    dragging: false,
+    dragPointerId: null,
+
+    // Audio nodes
+    osc1, osc2, osc3,
+    gain1, gain2, gain3,
+    mixGain,
+
+    // Trail history (recent bob positions)
+    trail: [],
+  };
+}
+
+function updatePendulumFreqs(p, gravity) {
+  const freq = lengthToFreq(p.length, gravity);
+  const now = 0; // we'll use setTargetAtTime with a small time constant
+  p.osc1.frequency.setTargetAtTime(freq, 0, 0.02);
+  p.osc2.frequency.setTargetAtTime(freq * 2, 0, 0.02);
+  p.osc3.frequency.setTargetAtTime(freq * 3, 0, 0.02);
+}
+
+function getPendulumBob(p, width, height) {
+  const ax = p.anchorX * width;
+  const ay = 30; // anchor at top
+  const len = p.length * height * 0.8;
+  const bx = ax + Math.sin(p.angle) * len;
+  const by = ay + Math.cos(p.angle) * len;
+  return { ax, ay, bx, by, len };
+}
+
+createToy({
+  name: 'Pendulum Choir',
+  description: 'Drag pendulums to set their length. Tap to release and hear them phase. Tap a swinging pendulum to mute/unmute. Use the gravity slider (or drag vertically on the background) to change swing speed.',
+
+  setup(ctx) {
+    const gravity = { value: G_DEFAULT };
+    const pendulums = [];
+
+    for (let i = 0; i < NUM_PENDULUMS; i++) {
+      pendulums.push(createPendulum(i, NUM_PENDULUMS, ctx, gravity.value));
+    }
+
+    // Release all pendulums with a slight initial angle for immediate motion
+    for (const p of pendulums) {
+      p.released = true;
+      p.angle = 0.4; // starting angle ~23 degrees
+      p.angularVel = 0;
+    }
+
+    return { pendulums, gravity, lastTime: null, gravityDragId: null, gravityDragStartY: null };
+  },
+
+  onInput(ctx, state, event) {
+    const { pendulums, gravity } = state;
+    const BOB_RADIUS = 18;
+
+    switch (event.type) {
+      case 'pointer-down': {
+        const px = event.x * ctx.width;
+        const py = event.y * ctx.height;
+
+        // Check if we hit a pendulum bob
+        let hitPendulum = null;
+        for (const p of pendulums) {
+          const { bx, by } = getPendulumBob(p, ctx.width, ctx.height);
+          const dist = Math.hypot(px - bx, py - by);
+          if (dist < BOB_RADIUS + 15) {
+            hitPendulum = p;
+            break;
+          }
+        }
+
+        if (hitPendulum) {
+          if (hitPendulum.released && !hitPendulum.dragging) {
+            // Tap a swinging pendulum → toggle mute
+            hitPendulum.muted = !hitPendulum.muted;
+            hitPendulum.mixGain.gain.setTargetAtTime(
+              hitPendulum.muted ? 0 : 0.12, ctx.currentTime, 0.05
+            );
+          } else {
+            // Start dragging
+            hitPendulum.dragging = true;
+            hitPendulum.dragPointerId = event.pointerId;
+            hitPendulum.released = false;
+            hitPendulum.angularVel = 0;
+          }
+        } else {
+          // Gravity drag on background
+          state.gravityDragId = event.pointerId;
+          state.gravityDragStartY = event.y;
+          state.gravityStartVal = gravity.value;
+        }
+        break;
+      }
+
+      case 'pointer-move': {
+        // Check if we're dragging a pendulum
+        for (const p of pendulums) {
+          if (p.dragging && p.dragPointerId === event.pointerId) {
+            const px = event.x * ctx.width;
+            const py = event.y * ctx.height;
+            const { ax, ay } = getPendulumBob(p, ctx.width, ctx.height);
+
+            // Calculate new length from drag position
+            const dx = px - ax;
+            const dy = py - ay;
+            const dist = Math.hypot(dx, dy);
+            const newLength = Math.max(MIN_LENGTH, Math.min(MAX_LENGTH, dist / (ctx.height * 0.8)));
+            p.length = newLength;
+
+            // Calculate angle from drag
+            p.angle = Math.atan2(dx, dy);
+
+            // Update frequencies
+            updatePendulumFreqs(p, gravity.value);
+
+            // Set gain proportional to displacement for preview
+            const amp = Math.abs(Math.sin(p.angle)) * 0.7;
+            if (!p.muted) {
+              p.gain1.gain.setTargetAtTime(amp, ctx.currentTime, 0.02);
+              p.gain2.gain.setTargetAtTime(amp * 0.3, ctx.currentTime, 0.02);
+              p.gain3.gain.setTargetAtTime(amp * 0.15, ctx.currentTime, 0.02);
+            }
+            return;
+          }
+        }
+
+        // Gravity drag
+        if (state.gravityDragId === event.pointerId && state.gravityDragStartY !== null) {
+          const dy = state.gravityDragStartY - event.y; // drag up = more gravity
+          gravity.value = Math.max(1, Math.min(30, state.gravityStartVal + dy * 30));
+        }
+        break;
+      }
+
+      case 'pointer-up': {
+        for (const p of pendulums) {
+          if (p.dragging && p.dragPointerId === event.pointerId) {
+            p.dragging = false;
+            p.dragPointerId = null;
+            p.released = true;
+            // Keep current angle, start swinging from there
+            p.angularVel = 0;
+            return;
+          }
+        }
+        if (state.gravityDragId === event.pointerId) {
+          state.gravityDragId = null;
+          state.gravityDragStartY = null;
+        }
+        break;
+      }
+    }
+  },
+
+  render(ctx, state, time) {
+    const { ctx2d, width, height } = ctx;
+    const { pendulums, gravity } = state;
+
+    // Delta time for physics
+    const dt = state.lastTime ? Math.min((time - state.lastTime) / 1000, 0.05) : 1 / 60;
+    state.lastTime = time;
+
+    // Measure alignment: how close all released pendulums' phases are
+    let alignment = 0;
+    const releasedPendulums = pendulums.filter(p => p.released && !p.dragging);
+    if (releasedPendulums.length > 1) {
+      // Use cosine of angles to measure alignment
+      let sumCos = 0;
+      let sumSin = 0;
+      for (const p of releasedPendulums) {
+        // Normalize angle to phase
+        sumCos += Math.cos(p.angle * 2);
+        sumSin += Math.sin(p.angle * 2);
+      }
+      const n = releasedPendulums.length;
+      alignment = Math.sqrt(sumCos * sumCos + sumSin * sumSin) / n;
+    }
+
+    // Background: darken when out of sync, brighten at alignment
+    const bgBrightness = Math.floor(8 + alignment * 12);
+    ctx2d.fillStyle = `rgb(${bgBrightness}, ${bgBrightness}, ${Math.floor(bgBrightness * 1.3)})`;
+    ctx2d.fillRect(0, 0, width, height);
+
+    // Physics update and audio modulation
+    for (const p of pendulums) {
+      if (p.released && !p.dragging) {
+        // Simple harmonic motion: α = -(g/L) * sin(θ)
+        // Using normalized length, scale gravity to get good periods
+        const effectiveLength = p.length * 3; // scale factor for reasonable swing speeds
+        const angularAccel = -(gravity.value / effectiveLength) * Math.sin(p.angle);
+
+        // Very light damping for natural decay
+        p.angularVel += angularAccel * dt;
+        p.angularVel *= 0.9997;
+        p.angle += p.angularVel * dt;
+      }
+
+      // Audio: amplitude follows bob displacement (louder at extremes of swing)
+      const ampFromSwing = Math.abs(Math.sin(p.angle));
+      if (!p.dragging) {
+        if (!p.muted) {
+          p.gain1.gain.setTargetAtTime(ampFromSwing * 0.7, 0, 0.03);
+          p.gain2.gain.setTargetAtTime(ampFromSwing * 0.2, 0, 0.03);
+          p.gain3.gain.setTargetAtTime(ampFromSwing * 0.1, 0, 0.03);
+        } else {
+          p.gain1.gain.setTargetAtTime(0, 0, 0.03);
+          p.gain2.gain.setTargetAtTime(0, 0, 0.03);
+          p.gain3.gain.setTargetAtTime(0, 0, 0.03);
+        }
+      }
+
+      // Bob position
+      const { ax, ay, bx, by, len } = getPendulumBob(p, width, height);
+
+      // Trail: record bob position
+      p.trail.push({ x: bx, y: by, t: time });
+      if (p.trail.length > 60) p.trail.shift();
+
+      // Draw trail (faint arcs)
+      if (p.trail.length > 2 && p.released) {
+        ctx2d.beginPath();
+        ctx2d.moveTo(p.trail[0].x, p.trail[0].y);
+        for (let i = 1; i < p.trail.length; i++) {
+          const alpha = i / p.trail.length;
+          ctx2d.strokeStyle = `rgba(100, 160, 255, ${alpha * 0.15})`;
+          ctx2d.lineTo(p.trail[i].x, p.trail[i].y);
+        }
+        ctx2d.lineWidth = 2;
+        ctx2d.stroke();
+      }
+
+      // Draw string
+      ctx2d.beginPath();
+      ctx2d.moveTo(ax, ay);
+      ctx2d.lineTo(bx, by);
+      ctx2d.strokeStyle = p.muted ? 'rgba(100, 100, 100, 0.4)' : 'rgba(200, 210, 230, 0.6)';
+      ctx2d.lineWidth = 1.5;
+      ctx2d.stroke();
+
+      // Draw bob with glow
+      const glowIntensity = p.muted ? 0.1 : ampFromSwing;
+      const bobRadius = 10 + glowIntensity * 4;
+
+      // Outer glow
+      const gradient = ctx2d.createRadialGradient(bx, by, 0, bx, by, bobRadius * 3);
+      const hue = 200 + p.index * 20; // each pendulum slightly different color
+      gradient.addColorStop(0, `hsla(${hue}, 70%, 70%, ${glowIntensity * 0.5})`);
+      gradient.addColorStop(0.5, `hsla(${hue}, 70%, 60%, ${glowIntensity * 0.15})`);
+      gradient.addColorStop(1, `hsla(${hue}, 70%, 50%, 0)`);
+      ctx2d.fillStyle = gradient;
+      ctx2d.beginPath();
+      ctx2d.arc(bx, by, bobRadius * 3, 0, Math.PI * 2);
+      ctx2d.fill();
+
+      // Bob core
+      ctx2d.fillStyle = p.muted
+        ? 'rgba(80, 80, 80, 0.6)'
+        : `hsla(${hue}, 80%, ${60 + glowIntensity * 30}%, ${0.7 + glowIntensity * 0.3})`;
+      ctx2d.beginPath();
+      ctx2d.arc(bx, by, bobRadius, 0, Math.PI * 2);
+      ctx2d.fill();
+
+      // Mute indicator
+      if (p.muted) {
+        ctx2d.strokeStyle = 'rgba(255, 80, 80, 0.6)';
+        ctx2d.lineWidth = 2;
+        ctx2d.beginPath();
+        ctx2d.moveTo(bx - 6, by - 6);
+        ctx2d.lineTo(bx + 6, by + 6);
+        ctx2d.moveTo(bx + 6, by - 6);
+        ctx2d.lineTo(bx - 6, by + 6);
+        ctx2d.stroke();
+      }
+
+      // Draw pivot point
+      ctx2d.fillStyle = 'rgba(200, 210, 230, 0.5)';
+      ctx2d.beginPath();
+      ctx2d.arc(ax, ay, 3, 0, Math.PI * 2);
+      ctx2d.fill();
+    }
+
+    // Draw gravity indicator
+    const gNorm = (gravity.value - 1) / 29; // 0 to 1
+    const barX = width - 30;
+    const barTop = 50;
+    const barHeight = 120;
+
+    ctx2d.fillStyle = 'rgba(255, 255, 255, 0.08)';
+    ctx2d.fillRect(barX - 8, barTop, 16, barHeight);
+
+    ctx2d.fillStyle = 'rgba(100, 180, 255, 0.5)';
+    const fillH = gNorm * barHeight;
+    ctx2d.fillRect(barX - 6, barTop + barHeight - fillH, 12, fillH);
+
+    ctx2d.fillStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx2d.font = '10px system-ui';
+    ctx2d.textAlign = 'center';
+    ctx2d.fillText('g', barX, barTop - 8);
+    ctx2d.fillText(gravity.value.toFixed(1), barX, barTop + barHeight + 14);
+
+    // Instructions overlay (fade out)
+    const fadeStart = 4000;
+    const fadeDuration = 2000;
+    if (time < fadeStart + fadeDuration) {
+      const alpha = time < fadeStart ? 0.5 : 0.5 * (1 - (time - fadeStart) / fadeDuration);
+      if (alpha > 0.01) {
+        ctx2d.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+        ctx2d.font = '14px system-ui';
+        ctx2d.textAlign = 'center';
+        ctx2d.fillText('drag bobs to set length \u2022 tap to mute \u2022 drag background to change gravity', width / 2, height - 30);
+        ctx2d.textAlign = 'start';
+      }
+    }
+  },
+
+  teardown(ctx, state) {
+    for (const p of state.pendulums) {
+      p.osc1.stop();
+      p.osc2.stop();
+      p.osc3.stop();
+    }
+  },
+
+  options: {
+    visual: 'canvas2d',
+    inputs: ['pointer'],
+    background: '#080810',
+  },
+});
+</script>
+</body>
+</html>

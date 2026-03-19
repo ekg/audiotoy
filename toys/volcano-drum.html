@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Volcano Drum</title>
+</head>
+<body>
+<script type="module">
+import { createToy } from '../scaffold/lib/toy.js';
+
+createToy({
+  name: 'Volcano Drum',
+  description: 'Tap the surface to trigger percussive eruptions. Left = kick, center = snare, right = hat. Ghost rhythms echo your patterns.',
+
+  setup(ctx) {
+    // Pre-generate white noise buffer (2 seconds)
+    const noiseLength = ctx.sampleRate * 2;
+    const noiseBuffer = ctx.audio.createBuffer(1, noiseLength, ctx.sampleRate);
+    const noiseData = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < noiseLength; i++) {
+      noiseData[i] = Math.random() * 2 - 1;
+    }
+
+    // Ghost rhythm circular buffer: stores recent taps
+    const ghostBuffer = [];
+    const maxGhosts = 32;
+    const ghostDelay = 1200;  // ms before ghost echoes start
+    const ghostFade = 4000;   // ms over which ghosts fade out
+
+    // Visual eruptions
+    const eruptions = [];
+
+    // Active long-press rumbles
+    const rumbles = new Map();
+
+    // Pinch state for resonance control
+    const resonanceScale = { value: 1.0 };
+
+    return {
+      noiseBuffer,
+      ghostBuffer,
+      maxGhosts,
+      ghostDelay,
+      ghostFade,
+      eruptions,
+      rumbles,
+      resonanceScale,
+      lastGhostCheck: 0,
+    };
+  },
+
+  onInput(ctx, state, event) {
+    switch (event.type) {
+      case 'pointer-down': {
+        triggerHit(ctx, state, event.x, event.y, 1.0, false);
+
+        // Record for ghost rhythm
+        state.ghostBuffer.push({
+          x: event.x,
+          y: event.y,
+          time: performance.now(),
+          played: false,
+        });
+        if (state.ghostBuffer.length > state.maxGhosts) {
+          state.ghostBuffer.shift();
+        }
+
+        // Start rumble tracking for long-press
+        state.rumbles.set(event.pointerId, {
+          x: event.x,
+          y: event.y,
+          startTime: performance.now(),
+          rumbleNode: null,
+          rumbleGain: null,
+        });
+        break;
+      }
+
+      case 'pointer-move': {
+        const rumble = state.rumbles.get(event.pointerId);
+        if (rumble) {
+          rumble.x = event.x;
+          rumble.y = event.y;
+
+          // Start rumble after 300ms of holding
+          const held = performance.now() - rumble.startTime;
+          if (held > 300 && !rumble.rumbleNode) {
+            startRumble(ctx, state, rumble);
+          }
+
+          // Update rumble filter if active
+          if (rumble.rumbleNode) {
+            const freq = xToFreq(event.x);
+            rumble.filter.frequency.setTargetAtTime(freq, ctx.currentTime, 0.05);
+          }
+        }
+        break;
+      }
+
+      case 'pointer-up': {
+        const rumble = state.rumbles.get(event.pointerId);
+        if (rumble && rumble.rumbleNode) {
+          stopRumble(ctx, rumble);
+        }
+        state.rumbles.delete(event.pointerId);
+        break;
+      }
+    }
+  },
+
+  render(ctx, state, time) {
+    const { ctx2d, width, height } = ctx;
+
+    // Dark basalt background
+    ctx2d.fillStyle = '#0d0a08';
+    ctx2d.fillRect(0, 0, width, height);
+
+    // Subtle surface texture: faint noise pattern
+    drawSurface(ctx2d, width, height, time);
+
+    // Process ghost rhythms
+    processGhosts(ctx, state, time);
+
+    // Draw and update eruptions
+    for (let i = state.eruptions.length - 1; i >= 0; i--) {
+      const e = state.eruptions[i];
+      const age = time - e.startTime;
+      const life = age / e.duration;
+
+      if (life > 1) {
+        state.eruptions.splice(i, 1);
+        continue;
+      }
+
+      drawEruption(ctx2d, width, height, e, life);
+    }
+
+    // Draw active rumble glow
+    for (const [, rumble] of state.rumbles) {
+      if (rumble.rumbleNode) {
+        const pulse = 0.3 + 0.2 * Math.sin(time / 80);
+        const rx = rumble.x * width;
+        const ry = rumble.y * height;
+        const grad = ctx2d.createRadialGradient(rx, ry, 0, rx, ry, 80);
+        const hue = xToHue(rumble.x);
+        grad.addColorStop(0, `hsla(${hue}, 80%, 40%, ${pulse})`);
+        grad.addColorStop(1, `hsla(${hue}, 80%, 20%, 0)`);
+        ctx2d.fillStyle = grad;
+        ctx2d.beginPath();
+        ctx2d.arc(rx, ry, 80, 0, Math.PI * 2);
+        ctx2d.fill();
+      }
+    }
+
+    // Fading instructions
+    const fadeStart = 4000;
+    const fadeDuration = 2000;
+    if (time < fadeStart + fadeDuration) {
+      const alpha = time < fadeStart ? 0.4 : 0.4 * (1 - (time - fadeStart) / fadeDuration);
+      if (alpha > 0.01) {
+        ctx2d.fillStyle = `rgba(255, 200, 150, ${alpha})`;
+        ctx2d.font = '14px system-ui';
+        ctx2d.textAlign = 'center';
+        ctx2d.fillText('tap to erupt \u2022 hold for rumble \u2022 left=kick center=snare right=hat', width / 2, 30);
+        ctx2d.textAlign = 'start';
+      }
+    }
+  },
+
+  teardown(ctx, state) {
+    for (const [, rumble] of state.rumbles) {
+      if (rumble.rumbleNode) {
+        stopRumble(ctx, rumble);
+      }
+    }
+    state.rumbles.clear();
+  },
+
+  options: {
+    visual: 'canvas2d',
+    inputs: ['pointer'],
+    background: '#0d0a08',
+  },
+});
+
+// ── Synthesis ──
+
+function xToFreq(x) {
+  // Map x position to center frequency cluster
+  // left (0) = kick ~60-150 Hz, center (0.5) = snare ~200-800 Hz, right (1) = hat ~2000-10000 Hz
+  return 60 * Math.pow(10000 / 60, Math.max(0, Math.min(1, x)));
+}
+
+function xToHue(x) {
+  // Deep red (kick) → orange (snare) → white/yellow (hat)
+  return 10 + x * 40; // 10 to 50, reds to yellows
+}
+
+function triggerHit(ctx, state, x, y, intensity, isGhost) {
+  const now = ctx.currentTime;
+  const centerFreq = xToFreq(x);
+
+  // Resonance from y-axis (top = high Q, bottom = low Q) scaled by pinch control
+  const baseQ = 1 + (1 - y) * 25;
+  const q = baseQ * state.resonanceScale.value;
+
+  // Randomize slightly for organic feel
+  const jitter = () => 0.85 + Math.random() * 0.3;
+
+  // Create 3 parallel bandpass filters for richer timbre
+  const filterCount = 3;
+  const filterSpread = [0.7, 1.0, 1.4]; // frequency multipliers
+  const merger = ctx.audio.createGain();
+  merger.gain.value = (isGhost ? 0.15 : 0.4) * intensity / filterCount;
+  ctx.connect(merger);
+
+  for (let f = 0; f < filterCount; f++) {
+    // New noise source for each hit
+    const noise = ctx.audio.createBufferSource();
+    noise.buffer = state.noiseBuffer;
+    noise.loop = false;
+
+    const filter = ctx.audio.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = centerFreq * filterSpread[f] * jitter();
+    filter.Q.value = q * jitter();
+
+    const env = ctx.audio.createGain();
+    env.gain.value = 0;
+
+    noise.connect(filter);
+    filter.connect(env);
+    env.connect(merger);
+
+    // Amplitude envelope: sharp attack, variable decay
+    // Kick = longer decay, hat = shorter decay
+    const decayTime = 0.05 + (1 - x) * 0.35; // 0.05s (hat) to 0.4s (kick)
+    env.gain.setValueAtTime(0, now);
+    env.gain.linearRampToValueAtTime(1, now + 0.003); // 3ms attack
+    env.gain.exponentialRampToValueAtTime(0.001, now + decayTime);
+
+    noise.start(now);
+    noise.stop(now + decayTime + 0.05);
+  }
+
+  // Add visual eruption
+  const hue = xToHue(x);
+  const eruptionSize = 30 + (1 - x) * 60; // bigger for kicks
+  state.eruptions.push({
+    x,
+    y,
+    hue,
+    size: eruptionSize * intensity,
+    startTime: performance.now(),
+    duration: 600 + (1 - x) * 800,
+    isGhost,
+    ringCount: 2 + Math.floor(Math.random() * 3),
+  });
+}
+
+function startRumble(ctx, state, rumble) {
+  const noise = ctx.audio.createBufferSource();
+  noise.buffer = state.noiseBuffer;
+  noise.loop = true;
+
+  const filter = ctx.audio.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.frequency.value = xToFreq(rumble.x);
+  filter.Q.value = 3;
+
+  const gain = ctx.audio.createGain();
+  gain.gain.value = 0;
+  gain.gain.linearRampToValueAtTime(0.2, ctx.currentTime + 0.3);
+
+  // Add a low-frequency tremolo for rumble effect
+  const lfo = ctx.audio.createOscillator();
+  lfo.frequency.value = 15 + Math.random() * 10;
+  const lfoGain = ctx.audio.createGain();
+  lfoGain.gain.value = 0.15;
+  lfo.connect(lfoGain);
+  lfoGain.connect(gain.gain);
+
+  noise.connect(filter);
+  filter.connect(gain);
+  ctx.connect(gain);
+  noise.start();
+  lfo.start();
+
+  rumble.rumbleNode = noise;
+  rumble.rumbleGain = gain;
+  rumble.filter = filter;
+  rumble.lfo = lfo;
+}
+
+function stopRumble(ctx, rumble) {
+  const now = ctx.currentTime;
+  rumble.rumbleGain.gain.cancelScheduledValues(now);
+  rumble.rumbleGain.gain.setValueAtTime(rumble.rumbleGain.gain.value, now);
+  rumble.rumbleGain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+  rumble.rumbleNode.stop(now + 0.3);
+  rumble.lfo.stop(now + 0.3);
+}
+
+// ── Ghost Rhythm System ──
+
+function processGhosts(ctx, state, time) {
+  const now = performance.now();
+
+  for (const ghost of state.ghostBuffer) {
+    const age = now - ghost.time;
+
+    // Ghost echoes start after ghostDelay
+    if (age < state.ghostDelay) continue;
+
+    // Determine which echo iteration this is
+    const echoAge = age - state.ghostDelay;
+    const echoInterval = state.ghostDelay; // repeat at same interval
+    const echoIndex = Math.floor(echoAge / echoInterval);
+
+    // Only play each echo once, max 3 echoes
+    if (echoIndex >= 3) continue;
+
+    const echoKey = `${ghost.time}-${echoIndex}`;
+    if (!ghost.playedEchoes) ghost.playedEchoes = new Set();
+    if (ghost.playedEchoes.has(echoKey)) continue;
+    ghost.playedEchoes.add(echoKey);
+
+    // Fade intensity with each echo
+    const fadeRatio = 1 - (echoAge / state.ghostFade);
+    if (fadeRatio <= 0) continue;
+
+    const intensity = fadeRatio * 0.6;
+
+    // Add jitter to position
+    const jitterX = ghost.x + (Math.random() - 0.5) * 0.05;
+    const jitterY = ghost.y + (Math.random() - 0.5) * 0.05;
+
+    triggerHit(ctx, state,
+      Math.max(0, Math.min(1, jitterX)),
+      Math.max(0, Math.min(1, jitterY)),
+      intensity,
+      true
+    );
+  }
+
+  // Clean up old ghosts
+  const maxAge = state.ghostDelay + state.ghostFade + 1000;
+  while (state.ghostBuffer.length > 0 && (now - state.ghostBuffer[0].time) > maxAge) {
+    state.ghostBuffer.shift();
+  }
+}
+
+// ── Visuals ──
+
+function drawSurface(ctx2d, width, height, time) {
+  // Subtle heat shimmer lines
+  ctx2d.strokeStyle = 'rgba(255, 80, 20, 0.02)';
+  ctx2d.lineWidth = 1;
+  const lineCount = 8;
+  for (let i = 0; i < lineCount; i++) {
+    const baseY = (height / lineCount) * i + height / lineCount * 0.5;
+    ctx2d.beginPath();
+    for (let x = 0; x < width; x += 20) {
+      const waveY = baseY + Math.sin(x * 0.01 + time * 0.001 + i) * 3;
+      if (x === 0) ctx2d.moveTo(x, waveY);
+      else ctx2d.lineTo(x, waveY);
+    }
+    ctx2d.stroke();
+  }
+}
+
+function drawEruption(ctx2d, width, height, e, life) {
+  const ex = e.x * width;
+  const ey = e.y * height;
+  const alpha = e.isGhost ? 0.3 : 0.8;
+
+  for (let r = 0; r < e.ringCount; r++) {
+    const ringLife = Math.max(0, life - r * 0.1);
+    if (ringLife <= 0 || ringLife > 1) continue;
+
+    const radius = e.size * ringLife * (1 + r * 0.5);
+    const ringAlpha = alpha * (1 - ringLife) * (1 - r * 0.2);
+
+    if (ringAlpha <= 0) continue;
+
+    // Glow
+    const grad = ctx2d.createRadialGradient(ex, ey, radius * 0.7, ex, ey, radius);
+    const lightness = e.isGhost ? '30%' : '50%';
+    grad.addColorStop(0, `hsla(${e.hue}, 90%, ${lightness}, ${ringAlpha * 0.3})`);
+    grad.addColorStop(1, `hsla(${e.hue}, 90%, ${lightness}, 0)`);
+    ctx2d.fillStyle = grad;
+    ctx2d.beginPath();
+    ctx2d.arc(ex, ey, radius, 0, Math.PI * 2);
+    ctx2d.fill();
+
+    // Ring outline
+    ctx2d.strokeStyle = `hsla(${e.hue}, 90%, 60%, ${ringAlpha})`;
+    ctx2d.lineWidth = e.isGhost ? 1 : 2;
+    ctx2d.beginPath();
+    ctx2d.arc(ex, ey, radius, 0, Math.PI * 2);
+    ctx2d.stroke();
+  }
+
+  // Center flash on new eruptions
+  if (life < 0.15 && !e.isGhost) {
+    const flashAlpha = (0.15 - life) / 0.15;
+    ctx2d.fillStyle = `hsla(${e.hue + 20}, 100%, 80%, ${flashAlpha * 0.9})`;
+    ctx2d.beginPath();
+    ctx2d.arc(ex, ey, 6 + e.size * 0.1, 0, Math.PI * 2);
+    ctx2d.fill();
+  }
+
+  // Spark particles for hi-hat taps (right side)
+  if (e.x > 0.7 && life < 0.5 && !e.isGhost) {
+    const sparkCount = 4;
+    for (let s = 0; s < sparkCount; s++) {
+      const angle = (s / sparkCount) * Math.PI * 2 + life * 3;
+      const dist = e.size * life * 1.5;
+      const sx = ex + Math.cos(angle) * dist;
+      const sy = ey + Math.sin(angle) * dist;
+      const sparkAlpha = 0.8 * (1 - life * 2);
+      if (sparkAlpha > 0) {
+        ctx2d.fillStyle = `hsla(50, 100%, 90%, ${sparkAlpha})`;
+        ctx2d.beginPath();
+        ctx2d.arc(sx, sy, 2, 0, Math.PI * 2);
+        ctx2d.fill();
+      }
+    }
+  }
+}
+</script>
+</body>
+</html>
