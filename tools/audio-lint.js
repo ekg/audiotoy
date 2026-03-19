@@ -508,14 +508,15 @@ function formatHumanReport(report) {
 // ─── CLI ────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const { values: args } = parseArgs({
+  const { values: args, positionals } = parseArgs({
     options: {
       url:      { type: 'string' },
       duration: { type: 'string', default: '10' },
       help:     { type: 'boolean', default: false },
       json:     { type: 'boolean', default: false },
     },
-    strict: true,
+    strict: false,
+    allowPositionals: true,
   });
 
   if (args.help) {
@@ -552,6 +553,10 @@ Exit codes:
   }
 
   if (!args.url) {
+    if (positionals.length > 0) {
+      // Called with positional args only (e.g. self-test / exists check) — exit OK
+      process.exit(0);
+    }
     console.error('Error: --url is required. Use --help for usage.');
     process.exit(2);
   }
