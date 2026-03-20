@@ -1,3 +1,22 @@
-.workgraph
+# Workgraph
+.workgraph/
+
+# Dependencies
 node_modules/
+
+# Test artifacts
 test-results/
+playwright-report/
+
+# Build artifacts
+dist/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
