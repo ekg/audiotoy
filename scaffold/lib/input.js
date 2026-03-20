@@ -71,6 +71,7 @@ export function createInputManager(target, options = {}) {
 
   // --- Pointer Events ---
   function onPointerDown(e) {
+    e.preventDefault(); // Prevent Firefox mobile from initiating scroll/zoom
     const { x, y } = normalizeCoords(e.clientX, e.clientY);
     const info = { x, y, pressure: e.pressure, pointerType: e.pointerType };
     activePointers.set(e.pointerId, info);
@@ -85,6 +86,7 @@ export function createInputManager(target, options = {}) {
   }
 
   function onPointerMove(e) {
+    e.preventDefault(); // Prevent Firefox mobile default touch behaviors
     const { x, y } = normalizeCoords(e.clientX, e.clientY);
     if (activePointers.has(e.pointerId)) {
       activePointers.set(e.pointerId, { x, y, pressure: e.pressure, pointerType: e.pointerType });
@@ -100,6 +102,7 @@ export function createInputManager(target, options = {}) {
   }
 
   function onPointerEnd(e) {
+    e.preventDefault();
     const { x, y } = normalizeCoords(e.clientX, e.clientY);
     activePointers.delete(e.pointerId);
     emit({
@@ -130,9 +133,9 @@ export function createInputManager(target, options = {}) {
 
   function setup() {
     if (opts.pointer) {
-      addListener(target, 'pointerdown', onPointerDown);
-      addListener(target, 'pointermove', onPointerMove);
-      addListener(target, 'pointerup', onPointerEnd);
+      addListener(target, 'pointerdown', onPointerDown, { passive: false });
+      addListener(target, 'pointermove', onPointerMove, { passive: false });
+      addListener(target, 'pointerup', onPointerEnd, { passive: false });
       addListener(target, 'pointercancel', onPointerEnd);
     }
 

@@ -84,6 +84,7 @@ export function createToy(config) {
   document.body.style.background = background;
   document.body.style.width = '100vw';
   document.body.style.height = '100dvh';
+  document.body.style.touchAction = 'none';
 
   // Add viewport meta if not present
   if (!document.querySelector('meta[name="viewport"]')) {
@@ -99,6 +100,7 @@ export function createToy(config) {
   const container = document.createElement('div');
   container.style.position = 'fixed';
   container.style.inset = '0';
+  container.style.touchAction = 'none';
   document.body.appendChild(container);
 
   // Create visual layer

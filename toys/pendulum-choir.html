@@ -97,12 +97,12 @@ function createPendulum(index, total, ctx, gravity) {
   };
 }
 
-function updatePendulumFreqs(p, gravity) {
+function updatePendulumFreqs(p, gravity, audioTime) {
   const freq = lengthToFreq(p.length, gravity);
-  const now = 0; // we'll use setTargetAtTime with a small time constant
-  p.osc1.frequency.setTargetAtTime(freq, 0, 0.02);
-  p.osc2.frequency.setTargetAtTime(freq * 2, 0, 0.02);
-  p.osc3.frequency.setTargetAtTime(freq * 3, 0, 0.02);
+  const t = audioTime || 0;
+  p.osc1.frequency.setTargetAtTime(freq, t, 0.02);
+  p.osc2.frequency.setTargetAtTime(freq * 2, t, 0.02);
+  p.osc3.frequency.setTargetAtTime(freq * 3, t, 0.02);
 }
 
 function getPendulumBob(p, width, height) {
@@ -198,7 +198,7 @@ createToy({
             p.angle = Math.atan2(dx, dy);
 
             // Update frequencies
-            updatePendulumFreqs(p, gravity.value);
+            updatePendulumFreqs(p, gravity.value, ctx.currentTime);
 
             // Set gain proportional to displacement for preview
             const amp = Math.abs(Math.sin(p.angle)) * 0.7;
@@ -242,6 +242,7 @@ createToy({
   render(ctx, state, time) {
     const { ctx2d, width, height } = ctx;
     const { pendulums, gravity } = state;
+    const audioNow = ctx.currentTime;
 
     // Delta time for physics
     const dt = state.lastTime ? Math.min((time - state.lastTime) / 1000, 0.05) : 1 / 60;
@@ -286,13 +287,13 @@ createToy({
       const ampFromSwing = Math.abs(Math.sin(p.angle));
       if (!p.dragging) {
         if (!p.muted) {
-          p.gain1.gain.setTargetAtTime(ampFromSwing * 0.7, 0, 0.03);
-          p.gain2.gain.setTargetAtTime(ampFromSwing * 0.2, 0, 0.03);
-          p.gain3.gain.setTargetAtTime(ampFromSwing * 0.1, 0, 0.03);
+          p.gain1.gain.setTargetAtTime(ampFromSwing * 0.7, audioNow, 0.03);
+          p.gain2.gain.setTargetAtTime(ampFromSwing * 0.2, audioNow, 0.03);
+          p.gain3.gain.setTargetAtTime(ampFromSwing * 0.1, audioNow, 0.03);
         } else {
-          p.gain1.gain.setTargetAtTime(0, 0, 0.03);
-          p.gain2.gain.setTargetAtTime(0, 0, 0.03);
-          p.gain3.gain.setTargetAtTime(0, 0, 0.03);
+          p.gain1.gain.setTargetAtTime(0, audioNow, 0.03);
+          p.gain2.gain.setTargetAtTime(0, audioNow, 0.03);
+          p.gain3.gain.setTargetAtTime(0, audioNow, 0.03);
         }
       }
 

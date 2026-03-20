@@ -16,6 +16,7 @@ const STYLES = `
     align-items: center; justify-content: center; gap: 16px;
     background: rgba(0,0,0,0.85); color: #fff; pointer-events: auto;
     cursor: pointer; transition: opacity 0.3s; z-index: 200;
+    touch-action: none;
   }
   .toy-splash.hidden { opacity: 0; pointer-events: none; }
   .toy-splash-title { font-size: 24px; font-weight: 600; }
