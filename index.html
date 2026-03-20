@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audio Toys</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0a0a0f;
+    color: #e0e0e8;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 3rem 1.5rem;
+  }
+
+  h1 {
+    font-size: 2.4rem;
+    font-weight: 300;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 0.5rem;
+    color: #ffffff;
+  }
+
+  .subtitle {
+    font-size: 0.95rem;
+    color: #666;
+    margin-bottom: 3rem;
+    letter-spacing: 0.05em;
+  }
+
+  .toys {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1.25rem;
+    width: 100%;
+    max-width: 560px;
+  }
+
+  a.toy {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    background: #12121a;
+    border: 1px solid #1e1e2a;
+    border-radius: 10px;
+    padding: 1.5rem 1.75rem;
+    transition: border-color 0.25s, background 0.25s, transform 0.15s;
+  }
+
+  a.toy:hover, a.toy:focus-visible {
+    border-color: #3a3a55;
+    background: #16161f;
+    transform: translateY(-2px);
+    outline: none;
+  }
+
+  .toy-name {
+    font-size: 1.2rem;
+    font-weight: 500;
+    margin-bottom: 0.4rem;
+    color: #fff;
+  }
+
+  .toy-desc {
+    font-size: 0.88rem;
+    line-height: 1.5;
+    color: #888;
+  }
+
+  @media (min-width: 640px) {
+    body { padding: 5rem 2rem; }
+    h1 { font-size: 3rem; }
+    .toys { gap: 1.5rem; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Audio Toys</h1>
+<p class="subtitle">Interactive sonic experiments for your browser</p>
+
+<div class="toys">
+  <a class="toy" href="constellation-engine.html">
+    <div class="toy-name">Constellation Engine</div>
+    <div class="toy-desc">Place stars in a dark sky. A sweep beam plays each one as it passes — brighter stars sing louder, higher stars sing higher. Watch your constellation slowly drift and evolve.</div>
+  </a>
+
+  <a class="toy" href="dream-typewriter.html">
+    <div class="toy-name">Dream Typewriter</div>
+    <div class="toy-desc">Type freely and every letter becomes sound. Vowels sustain, consonants crack, spaces rest. Words become melodic phrases shaped by their phonetic soul.</div>
+  </a>
+
+  <a class="toy" href="pendulum-choir.html">
+    <div class="toy-name">Pendulum Choir</div>
+    <div class="toy-desc">Drag pendulums to set their length, then release. Shorter swings sing higher. As they phase in and out of sync, shimmering chords emerge and dissolve.</div>
+  </a>
+
+  <a class="toy" href="volcano-drum.html">
+    <div class="toy-name">Volcano Drum</div>
+    <div class="toy-desc">Tap a dark, seething surface to erupt procedural percussion. Position shapes timbre, speed builds polyrhythm, and ghost echoes play your patterns back.</div>
+  </a>
+</div>
+
+</body>
+</html>
