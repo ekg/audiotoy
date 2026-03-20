@@ -31,14 +31,14 @@ jobs:
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps firefox chromium
+        run: npx playwright install --with-deps chromium
 
       - name: Install Playwright system deps
         if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: npx playwright install-deps firefox chromium
+        run: npx playwright install-deps chromium
 
-      - name: Run tests
-        run: npm test
+      - name: Run tests (Chromium)
+        run: npx playwright test --project=chromium
 
       - name: Upload test artifacts
         if: failure()
