@@ -22,6 +22,7 @@ import { createAudioEngine, detectCapabilities } from './audio.js';
 import { createInputManager } from './input.js';
 import { createVisualLayer } from './visual.js';
 import { createUI } from './ui.js';
+import * as music from './music.js';
 
 /**
  * @typedef {Object} ToyConfig
@@ -54,6 +55,7 @@ import { createUI } from './ui.js';
  * @property {Map} pointers - Currently active pointers
  * @property {Set} keys - Currently held keys
  * @property {Object} capabilities - Browser capability flags
+ * @property {Object} music - Music theory utilities (see lib/music.js)
  */
 
 /**
@@ -134,6 +136,7 @@ export function createToy(config) {
     get width() { return visual.width; },
     get height() { return visual.height; },
     capabilities,
+    music,
   };
 
   let state = null;
