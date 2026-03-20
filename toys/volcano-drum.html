@@ -9,6 +9,10 @@
 <script type="module">
 import { createToy } from '../scaffold/lib/toy.js';
 
+const MUSIC_KEY = 'C';
+const MUSIC_SCALE = 'pentatonic_minor';
+const MAX_VOICES = 12;
+
 createToy({
   name: 'Volcano Drum',
   description: 'Tap the surface to trigger percussive eruptions. Left = kick, center = snare, right = hat. Ghost rhythms echo your patterns.',
@@ -37,6 +41,11 @@ createToy({
     // Pinch state for resonance control
     const resonanceScale = { value: 1.0 };
 
+    // Music: master compressor and voice pool
+    const compressor = ctx.music.createMasterCompressor(ctx.audio);
+    ctx.connect(compressor);
+    const voicePool = new ctx.music.VoicePool(MAX_VOICES, { baseGain: 0.3, releaseTime: 0.05 });
+
     return {
       noiseBuffer,
       ghostBuffer,
@@ -47,6 +56,9 @@ createToy({
       rumbles,
       resonanceScale,
       lastGhostCheck: 0,
+      compressor,
+      voicePool,
+      hitCounter: 0,
     };
   },
 
@@ -89,9 +101,10 @@ createToy({
             startRumble(ctx, state, rumble);
           }
 
-          // Update rumble filter if active
+          // Update rumble filter if active — quantize to scale
           if (rumble.rumbleNode) {
-            const freq = xToFreq(event.x);
+            const rawFreq = xToFreq(event.x);
+            const freq = ctx.music.quantizeToScale(rawFreq, MUSIC_KEY, MUSIC_SCALE);
             rumble.filter.frequency.setTargetAtTime(freq, ctx.currentTime, 0.05);
           }
         }
@@ -175,6 +188,7 @@ createToy({
       }
     }
     state.rumbles.clear();
+    state.voicePool.releaseAll(ctx.audio);
   },
 
   options: {
@@ -208,12 +222,19 @@ function triggerHit(ctx, state, x, y, intensity, isGhost) {
   // Randomize slightly for organic feel
   const jitter = () => 0.85 + Math.random() * 0.3;
 
+  // Allocate voice from pool (automatic gain staging)
+  const voiceId = `hit-${state.hitCounter++}`;
+  const voice = state.voicePool.allocate(voiceId, ctx.audio);
+  voice.connect(state.compressor);
+
   // Create 3 parallel bandpass filters for richer timbre
   const filterCount = 3;
   const filterSpread = [0.7, 1.0, 1.4]; // frequency multipliers
   const merger = ctx.audio.createGain();
   merger.gain.value = (isGhost ? 0.15 : 0.4) * intensity / filterCount;
-  ctx.connect(merger);
+  merger.connect(voice.gain);
+
+  let maxDecay = 0;
 
   for (let f = 0; f < filterCount; f++) {
     // New noise source for each hit
@@ -242,7 +263,14 @@ function triggerHit(ctx, state, x, y, intensity, isGhost) {
 
     noise.start(now);
     noise.stop(now + decayTime + 0.05);
+
+    maxDecay = Math.max(maxDecay, decayTime);
   }
+
+  // Release voice after decay
+  setTimeout(() => {
+    state.voicePool.release(voiceId, ctx.audio);
+  }, maxDecay * 1000 + 100);
 
   // Add visual eruption
   const hue = xToHue(x);
@@ -266,7 +294,10 @@ function startRumble(ctx, state, rumble) {
 
   const filter = ctx.audio.createBiquadFilter();
   filter.type = 'bandpass';
-  filter.frequency.value = xToFreq(rumble.x);
+  // Quantize rumble frequency to scale
+  const rawFreq = xToFreq(rumble.x);
+  const freq = ctx.music.quantizeToScale(rawFreq, MUSIC_KEY, MUSIC_SCALE);
+  filter.frequency.value = freq;
   filter.Q.value = 3;
 
   const gain = ctx.audio.createGain();
@@ -283,7 +314,7 @@ function startRumble(ctx, state, rumble) {
 
   noise.connect(filter);
   filter.connect(gain);
-  ctx.connect(gain);
+  gain.connect(state.compressor);
   noise.start();
   lfo.start();
 

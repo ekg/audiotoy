@@ -10,19 +10,9 @@
 import { createToy } from '../scaffold/lib/toy.js';
 
 // ── Musical constants ──────────────────────────────────────────────
-
-// Pentatonic scale degrees (semitones from root): C D E G A
-const PENTATONIC = [0, 2, 4, 7, 9];
-
-// Map letter index (0-25) to a pentatonic note across ~2 octaves
-function letterToPitch(letter) {
-  const idx = letter.toUpperCase().charCodeAt(0) - 65; // 0-25
-  if (idx < 0 || idx > 25) return 261.63; // fallback to C4
-  const octaveBase = 48 + Math.floor(idx / 5) * 12; // MIDI note, starting at C3
-  const degree = PENTATONIC[idx % 5];
-  const midiNote = octaveBase + degree;
-  return 440 * Math.pow(2, (midiNote - 69) / 12);
-}
+const MUSIC_KEY = 'C';
+const MUSIC_SCALE = 'pentatonic_minor';
+const MAX_VOICES = 6;
 
 // Vowel formant frequencies (F1, F2) for the five basic vowels
 const FORMANTS = {
@@ -68,11 +58,18 @@ function createNoiseBuffer(audioCtx, duration) {
   return buffer;
 }
 
-function playVowel(ctx, letter, shiftHeld) {
+function playVowel(ctx, state, letter, shiftHeld) {
   const audio = ctx.audio;
   const t = audio.currentTime;
-  const freq = letterToPitch(letter);
+
+  // Chord tone frequency for this vowel (pre-computed in setup)
+  const freq = state.vowelFreqs[letter.toLowerCase()] || state.vowelFreqs.a;
   const formant = FORMANTS[letter.toLowerCase()];
+
+  // Allocate voice from pool
+  const voiceId = `v-${state.voiceCounter++}`;
+  const voice = state.voicePool.allocate(voiceId, audio);
+  voice.connect(state.compressor);
 
   // Source: sawtooth oscillator
   const osc = audio.createOscillator();
@@ -122,20 +119,30 @@ function playVowel(ctx, letter, shiftHeld) {
   bp2.connect(g2);
   g2.connect(mix);
 
-  ctx.connect(mix);
+  mix.connect(voice.gain);
 
   osc.start(t);
   osc.stop(t + 0.55);
 
+  // Release voice after sound ends
+  setTimeout(() => {
+    state.voicePool.release(voiceId, audio);
+  }, 600);
+
   return { stopTime: t + 0.55 };
 }
 
-function playConsonant(ctx, letter, noiseBuffer, shiftHeld) {
+function playConsonant(ctx, state, letter, shiftHeld) {
   const audio = ctx.audio;
   const t = audio.currentTime;
 
+  // Allocate voice from pool
+  const voiceId = `v-${state.voiceCounter++}`;
+  const voice = state.voicePool.allocate(voiceId, audio);
+  voice.connect(state.compressor);
+
   const source = audio.createBufferSource();
-  source.buffer = noiseBuffer;
+  source.buffer = state.noiseBuffer;
 
   const filter = audio.createBiquadFilter();
   const gain = audio.createGain();
@@ -147,6 +154,7 @@ function playConsonant(ctx, letter, noiseBuffer, shiftHeld) {
   const nasals = new Set('MNL');
 
   const volume = shiftHeld ? 0.3 : 0.18;
+  let duration;
 
   if (plosives.has(letter.toUpperCase())) {
     // Short broadband burst
@@ -158,6 +166,7 @@ function playConsonant(ctx, letter, noiseBuffer, shiftHeld) {
     gain.gain.linearRampToValueAtTime(0, t + 0.06);
     source.start(t);
     source.stop(t + 0.08);
+    duration = 0.08;
   } else if (fricatives.has(letter.toUpperCase())) {
     // Filtered noise, longer
     filter.type = 'bandpass';
@@ -169,6 +178,7 @@ function playConsonant(ctx, letter, noiseBuffer, shiftHeld) {
     gain.gain.linearRampToValueAtTime(0, t + 0.15);
     source.start(t);
     source.stop(t + 0.18);
+    duration = 0.18;
   } else if (nasals.has(letter.toUpperCase())) {
     // Low-frequency resonance
     filter.type = 'lowpass';
@@ -180,6 +190,7 @@ function playConsonant(ctx, letter, noiseBuffer, shiftHeld) {
     gain.gain.linearRampToValueAtTime(0, t + 0.2);
     source.start(t);
     source.stop(t + 0.25);
+    duration = 0.25;
   } else {
     // Generic consonant
     filter.type = 'bandpass';
@@ -190,21 +201,34 @@ function playConsonant(ctx, letter, noiseBuffer, shiftHeld) {
     gain.gain.linearRampToValueAtTime(0, t + 0.1);
     source.start(t);
     source.stop(t + 0.12);
+    duration = 0.12;
   }
 
   source.connect(filter);
   filter.connect(gain);
-  ctx.connect(gain);
+  gain.connect(voice.gain);
+
+  // Release voice after sound ends
+  setTimeout(() => {
+    state.voicePool.release(voiceId, audio);
+  }, duration * 1000 + 50);
 }
 
-function playPunctuation(ctx, char, noiseBuffer) {
+function playPunctuation(ctx, state, char) {
   const audio = ctx.audio;
   const t = audio.currentTime;
+
+  // Allocate voice from pool
+  const voiceId = `v-${state.voiceCounter++}`;
+  const voice = state.voicePool.allocate(voiceId, audio);
+  voice.connect(state.compressor);
+
+  let duration = 0.3;
 
   if (char === ',') {
     // Breath: gentle noise exhale
     const source = audio.createBufferSource();
-    source.buffer = noiseBuffer;
+    source.buffer = state.noiseBuffer;
     const filter = audio.createBiquadFilter();
     filter.type = 'lowpass';
     filter.frequency.value = 600;
@@ -215,75 +239,86 @@ function playPunctuation(ctx, char, noiseBuffer) {
     gain.gain.linearRampToValueAtTime(0, t + 0.25);
     source.connect(filter);
     filter.connect(gain);
-    ctx.connect(gain);
+    gain.connect(voice.gain);
     source.start(t);
     source.stop(t + 0.3);
+    duration = 0.3;
   } else if (char === '.') {
-    // Cadence: low tone descending
+    // Cadence: root note descending octave
     const osc = audio.createOscillator();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(220, t);
-    osc.frequency.linearRampToValueAtTime(110, t + 0.3);
+    osc.frequency.setValueAtTime(state.punctFreqs.periodStart, t);
+    osc.frequency.linearRampToValueAtTime(state.punctFreqs.periodEnd, t + 0.3);
     const gain = audio.createGain();
     gain.gain.setValueAtTime(0.1, t);
     gain.gain.linearRampToValueAtTime(0, t + 0.35);
     osc.connect(gain);
-    ctx.connect(gain);
+    gain.connect(voice.gain);
     osc.start(t);
     osc.stop(t + 0.4);
+    duration = 0.4;
   } else if (char === '?') {
-    // Rising interval
+    // Rising fifth
     const osc = audio.createOscillator();
     osc.type = 'triangle';
-    osc.frequency.setValueAtTime(330, t);
-    osc.frequency.linearRampToValueAtTime(660, t + 0.25);
+    osc.frequency.setValueAtTime(state.punctFreqs.questionStart, t);
+    osc.frequency.linearRampToValueAtTime(state.punctFreqs.questionEnd, t + 0.25);
     const gain = audio.createGain();
     gain.gain.setValueAtTime(0.08, t);
     gain.gain.linearRampToValueAtTime(0.1, t + 0.15);
     gain.gain.linearRampToValueAtTime(0, t + 0.35);
     osc.connect(gain);
-    ctx.connect(gain);
+    gain.connect(voice.gain);
     osc.start(t);
     osc.stop(t + 0.4);
+    duration = 0.4;
   } else if (char === '!') {
-    // Exclamation: sharp accent
+    // Exclamation: sharp accent on root
     const osc = audio.createOscillator();
     osc.type = 'square';
-    osc.frequency.value = 440;
+    osc.frequency.value = state.punctFreqs.exclamation;
     const gain = audio.createGain();
     gain.gain.setValueAtTime(0, t);
     gain.gain.linearRampToValueAtTime(0.15, t + 0.01);
     gain.gain.linearRampToValueAtTime(0, t + 0.15);
     osc.connect(gain);
-    ctx.connect(gain);
+    gain.connect(voice.gain);
     osc.start(t);
     osc.stop(t + 0.2);
+    duration = 0.2;
   } else if (char === ';' || char === ':') {
-    // Soft pause
+    // Soft pause on fifth
     const osc = audio.createOscillator();
     osc.type = 'sine';
-    osc.frequency.value = 196;
+    osc.frequency.value = state.punctFreqs.semicolon;
     const gain = audio.createGain();
     gain.gain.setValueAtTime(0.05, t);
     gain.gain.linearRampToValueAtTime(0, t + 0.2);
     osc.connect(gain);
-    ctx.connect(gain);
+    gain.connect(voice.gain);
     osc.start(t);
     osc.stop(t + 0.25);
+    duration = 0.25;
   } else if (char === '-') {
-    // Dash: bridging tone
+    // Dash: bridging root tone
     const osc = audio.createOscillator();
     osc.type = 'sine';
-    osc.frequency.value = 262;
+    osc.frequency.value = state.punctFreqs.dash;
     const gain = audio.createGain();
     gain.gain.setValueAtTime(0.04, t);
     gain.gain.linearRampToValueAtTime(0.04, t + 0.15);
     gain.gain.linearRampToValueAtTime(0, t + 0.25);
     osc.connect(gain);
-    ctx.connect(gain);
+    gain.connect(voice.gain);
     osc.start(t);
     osc.stop(t + 0.3);
+    duration = 0.3;
   }
+
+  // Release voice after sound ends
+  setTimeout(() => {
+    state.voicePool.release(voiceId, audio);
+  }, duration * 1000 + 50);
 }
 
 // ── Visual data structures ──────────────────────────────────────────
@@ -310,19 +345,44 @@ const KB_ROWS = [
   'ASDFGHJKL',
   'ZXCVBNM',
 ];
-const KB_SPECIAL = [' ', '.', ',', '?', '!', '⌫'];
+const KB_SPECIAL = [' ', '.', ',', '?', '!', '\u232B'];
 
 // ── Main toy ──────────────────────────────────────────────────────
 
 createToy({
   name: 'Dream Typewriter',
-  description: 'Type freely — every letter has a sound. Vowels sing, consonants click, spaces rest, punctuation punctuates. Shift for brighter timbre.',
+  description: 'Type freely \u2014 every letter has a sound. Vowels sing, consonants click, spaces rest, punctuation punctuates. Shift for brighter timbre.',
 
   setup(ctx) {
     const noiseBuffer = createNoiseBuffer(ctx.audio, 0.5);
 
     // Detect touch device for on-screen keyboard
     const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+    // Music: master compressor and voice pool
+    const compressor = ctx.music.createMasterCompressor(ctx.audio);
+    ctx.connect(compressor);
+    const voicePool = new ctx.music.VoicePool(MAX_VOICES, { baseGain: 0.25, releaseTime: 0.05 });
+
+    // Vowel frequencies: chord tones in C minor (root, m3, 5th)
+    const vowelFreqs = {
+      a: ctx.music.noteNameToFreq('C4'),   // root
+      e: ctx.music.noteNameToFreq('D#4'),  // minor 3rd
+      i: ctx.music.noteNameToFreq('G4'),   // 5th
+      o: ctx.music.noteNameToFreq('C5'),   // root, octave up
+      u: ctx.music.noteNameToFreq('G3'),   // 5th, octave down
+    };
+
+    // Punctuation frequencies: all in key of C
+    const punctFreqs = {
+      periodStart: ctx.music.noteNameToFreq('C4'),
+      periodEnd: ctx.music.noteNameToFreq('C3'),
+      questionStart: ctx.music.noteNameToFreq('G3'),
+      questionEnd: ctx.music.noteNameToFreq('G4'),
+      exclamation: ctx.music.noteNameToFreq('C5'),
+      semicolon: ctx.music.noteNameToFreq('G3'),
+      dash: ctx.music.noteNameToFreq('C4'),
+    };
 
     return {
       noiseBuffer,
@@ -336,6 +396,11 @@ createToy({
       showKeyboard: isTouchDevice,
       kbHighlight: null,      // key being pressed on on-screen keyboard
       kbHighlightTime: 0,
+      compressor,
+      voicePool,
+      vowelFreqs,
+      punctFreqs,
+      voiceCounter: 0,
     };
   },
 
@@ -352,7 +417,7 @@ createToy({
       if (hitKey) {
         state.kbHighlight = hitKey;
         state.kbHighlightTime = performance.now();
-        if (hitKey === '⌫') {
+        if (hitKey === '\u232B') {
           handleKey(ctx, state, 'Backspace', performance.now());
         } else if (hitKey === ' ') {
           handleKey(ctx, state, 'Space', performance.now());
@@ -454,7 +519,7 @@ createToy({
   },
 
   teardown(ctx, state) {
-    // No persistent audio nodes to clean up — all are fire-and-forget
+    state.voicePool.releaseAll(ctx.audio);
   },
 
   options: {
@@ -523,11 +588,11 @@ function handleKey(ctx, state, keyCode, time) {
 
   // Play sound
   if (VOWELS.has(char)) {
-    playVowel(ctx, char, state.shiftHeld);
+    playVowel(ctx, state, char, state.shiftHeld);
   } else if (/[a-zA-Z]/.test(char)) {
-    playConsonant(ctx, char, state.noiseBuffer, state.shiftHeld);
+    playConsonant(ctx, state, char, state.shiftHeld);
   } else if (/[.,!?;:\-]/.test(char)) {
-    playPunctuation(ctx, char, state.noiseBuffer);
+    playPunctuation(ctx, state, char);
   }
 
   // Add visual letter
@@ -656,7 +721,7 @@ function drawKeyboard(ctx, state, time) {
   for (const { key, w } of specialKeys) {
     const label = key === ' ' ? 'space' : key;
     const isHighlighted = state.kbHighlight === key && (time - state.kbHighlightTime) < 150;
-    drawKey(ctx2d, label, sx, specialY, w, keyH, isHighlighted, key === '⌫' ? '#888' : punctuationColor());
+    drawKey(ctx2d, label, sx, specialY, w, keyH, isHighlighted, key === '\u232B' ? '#888' : punctuationColor());
     sx += w + gap;
   }
 }

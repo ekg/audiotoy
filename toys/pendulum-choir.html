@@ -15,18 +15,16 @@ const MIN_LENGTH = 0.15;     // min pendulum length (normalized 0-1 of screen)
 const MAX_LENGTH = 0.85;
 const NUM_PENDULUMS = 7;
 
-// Musical mapping: pendulum period T = 2π√(L/g)
-// Frequency = 1/T mapped to audible range
-// Shorter pendulum → higher frequency
+const MUSIC_KEY = 'C';
+const MUSIC_SCALE = 'pentatonic_minor';
+
+// Musical mapping: pendulum length → raw frequency, then quantized to scale
 const MIN_FREQ = 130;   // ~C3
 const MAX_FREQ = 880;   // ~A5
 
-function lengthToFreq(length, gravity) {
-  // T = 2π√(L/g), freq = 1/T
-  // We map normalized length to a musical frequency range
-  // Shorter = higher pitch
+function lengthToRawFreq(length) {
+  // Shorter pendulum = higher frequency (inverted mapping)
   const t = (length - MIN_LENGTH) / (MAX_LENGTH - MIN_LENGTH); // 0 (short) to 1 (long)
-  // Exponential mapping: short → high freq, long → low freq
   return MAX_FREQ * Math.pow(MIN_FREQ / MAX_FREQ, t);
 }
 
@@ -38,8 +36,9 @@ function createPendulum(index, total, ctx, gravity) {
   const lengthSpread = (MAX_LENGTH - MIN_LENGTH) / (total - 1);
   const length = MIN_LENGTH + lengthSpread * index;
 
-  // Create audio nodes: sine oscillator + 2 harmonics → gain
-  const freq = lengthToFreq(length, gravity);
+  // Quantize frequency to pentatonic minor scale
+  const rawFreq = lengthToRawFreq(length);
+  const freq = ctx.music.quantizeToScale(rawFreq, MUSIC_KEY, MUSIC_SCALE);
 
   const osc1 = ctx.audio.createOscillator();
   osc1.type = 'sine';
@@ -61,8 +60,9 @@ function createPendulum(index, total, ctx, gravity) {
   gain2.gain.value = 0;
   gain3.gain.value = 0;
 
+  // Mix gain: full level; VoicePool handles gain staging
   const mixGain = ctx.audio.createGain();
-  mixGain.gain.value = 0.12; // overall volume per pendulum
+  mixGain.gain.value = 1.0;
 
   osc1.connect(gain1);
   osc2.connect(gain2);
@@ -70,7 +70,7 @@ function createPendulum(index, total, ctx, gravity) {
   gain1.connect(mixGain);
   gain2.connect(mixGain);
   gain3.connect(mixGain);
-  ctx.connect(mixGain);
+  // Don't connect to output here — will be routed through VoicePool
 
   osc1.start();
   osc2.start();
@@ -97,8 +97,9 @@ function createPendulum(index, total, ctx, gravity) {
   };
 }
 
-function updatePendulumFreqs(p, gravity, audioTime) {
-  const freq = lengthToFreq(p.length, gravity);
+function updatePendulumFreqs(p, audioTime, music) {
+  const rawFreq = lengthToRawFreq(p.length);
+  const freq = music.quantizeToScale(rawFreq, MUSIC_KEY, MUSIC_SCALE);
   const t = audioTime || 0;
   p.osc1.frequency.setTargetAtTime(freq, t, 0.02);
   p.osc2.frequency.setTargetAtTime(freq * 2, t, 0.02);
@@ -122,8 +123,19 @@ createToy({
     const gravity = { value: G_DEFAULT };
     const pendulums = [];
 
+    // Music: master compressor and voice pool
+    const compressor = ctx.music.createMasterCompressor(ctx.audio);
+    ctx.connect(compressor);
+    const voicePool = new ctx.music.VoicePool(NUM_PENDULUMS, { baseGain: 0.3, releaseTime: 0.1 });
+
     for (let i = 0; i < NUM_PENDULUMS; i++) {
-      pendulums.push(createPendulum(i, NUM_PENDULUMS, ctx, gravity.value));
+      const p = createPendulum(i, NUM_PENDULUMS, ctx, gravity.value);
+      pendulums.push(p);
+
+      // Route through VoicePool for gain staging
+      const voice = voicePool.allocate(`pendulum-${i}`, ctx.audio);
+      voice.connect(compressor);
+      p.mixGain.connect(voice.gain);
     }
 
     // Release all pendulums with a slight initial angle for immediate motion
@@ -133,7 +145,7 @@ createToy({
       p.angularVel = 0;
     }
 
-    return { pendulums, gravity, lastTime: null, gravityDragId: null, gravityDragStartY: null };
+    return { pendulums, gravity, voicePool, compressor, lastTime: null, gravityDragId: null, gravityDragStartY: null };
   },
 
   onInput(ctx, state, event) {
@@ -161,7 +173,7 @@ createToy({
             // Tap a swinging pendulum → toggle mute
             hitPendulum.muted = !hitPendulum.muted;
             hitPendulum.mixGain.gain.setTargetAtTime(
-              hitPendulum.muted ? 0 : 0.12, ctx.currentTime, 0.05
+              hitPendulum.muted ? 0 : 1.0, ctx.currentTime, 0.05
             );
           } else {
             // Start dragging
@@ -197,8 +209,8 @@ createToy({
             // Calculate angle from drag
             p.angle = Math.atan2(dx, dy);
 
-            // Update frequencies
-            updatePendulumFreqs(p, gravity.value, ctx.currentTime);
+            // Update frequencies (quantized to scale)
+            updatePendulumFreqs(p, ctx.currentTime, ctx.music);
 
             // Set gain proportional to displacement for preview
             const amp = Math.abs(Math.sin(p.angle)) * 0.7;
@@ -407,6 +419,7 @@ createToy({
       p.osc2.stop();
       p.osc3.stop();
     }
+    state.voicePool.releaseAll(ctx.audio);
   },
 
   options: {
